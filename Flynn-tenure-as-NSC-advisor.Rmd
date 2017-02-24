@@ -1,0 +1,342 @@
+---
+title: 'Digital Media Ecosystem: How-To Participate for Data Scientists'
+output:
+  html_document:
+    theme: united
+    toc: yes
+  html_notebook: default
+---
+
+```{r set-options, echo=FALSE, results='hide'}
+options(width = 100)
+```
+
+## Introduction
+
+When something noteworthy happens in your neck of the woods (however small or big the woods might be) the following chain of events unrolls: newsfeeds publish the news, media reacts with expanded coverage and analysis, people react on Facebook, Twitter and other social networks, more extended analysis from the news outlets follows, TV stations continue with reports and interviews, and relevant Wikipedia pages get updated with new facts. This is how digital media ecosystem continues to thrive through constant self-regulating cycles leaving behind unprecedented digital footprint. In fact, without such footprint none of it would be perceived as real by anyone - if you can't share it online then it doesn't exist.
+```{r Produce News Cycle Workflow, echo=FALSE, results='markup', message=FALSE, warning=FALSE, error=FALSE}
+library(DiagrammeR)
+
+# grViz("R/digital-food-chain-diagram.dot")
+grViz('
+digraph G {
+  rotate=0;
+  rankdir=LR;
+  event -> news 
+  event [label="Noteworthy\nEvent"];
+  news [label="News\nPublished"];
+  news -> {print ; broadcast ; online }
+  print [label = "Print Media\nWeb Sites"];
+  broadcast [label="TV and Radio\nWeb Sites"];
+  online [label="Online News\nand Blogs"];
+  social_networks [label="Social Networks"];
+  print -> social_networks;
+  broadcast -> social_networks;
+  online -> social_networks;
+  social_networks -> { online ; broadcast ; print};
+  {rank=same; print; broadcast; online};
+  // title
+  labelloc="b";
+  labeljust="l";
+  label="Figure 1. Digital Media Ecosystem with Social Feedback Loop.\n";
+}', height = 300)
+```
+
+Behind each block (except the event itself) are many sites that compete for our time, clicks, and ultimately money. What makes them stand out are timeliness, content, focus, digital savviness and culture among other elements (e.g. see [7 Factors behind Success with Digital News](http://www.lucykung.com/blog/7-factors-behind-success-with-digital-news-what-buzzfeed-vice-quartz-the-guardian-and-the-new-york-times-are-doing-right/). Data science backed analytics and visualizations become increasingly important resource in successful implementation of such factors as illustrated by ever rising standards in visualization, statistics, and infographics set by [The New York Times](https://flowingdata.com/tag/new-york-times/), [The Economist](https://flowingdata.com/tag/economist), [FiveThirtyEight](https://flowingdata.com/tag/fivethirtyeight) and others ([here](http://flowingdata.com/category/visualization/) and [here](http://flowingdata.com/category/visualization/infographics/)).  
+
+Below is simple illustration of how data science (and data scientist) can contribute to create, enhance, and compliment digital news content. It's simple but realistic workflow of the news becoming data becoming story becoming visualization.
+
+
+## Simple Example of Visualization in Context of Digital News
+
+This is a how-to follow-up to my post [How Flynn's Term Compares to the National Security Advisor Tenures since 1953](http://winerank.blogspot.com/2017/02/how-flynns-term-compares-to-national.html) triggered by abrupt [resignation
+of President Trump's national security adviser Michael Flynn](https://www.nytimes.com/2017/02/13/us/politics/donald-trump-national-security-adviser-michael-flynn.html?_r=0) on February 13. The main premise of the analysis is to demonstrate how dramatically short Michael Flynn's tenure happened to be. 
+I used data from the Wikipedia [National Security Advisor (United States)](https://en.wikipedia.org/wiki/National_Security_Advisor_(United_States)#List_of_National_Security_Advisors). The visual is a bar chart with tenures of all NCS advisors with emphasis on: 
+
+ * Michale Flynn tenure (single data point)
+ * How signficantly shorter it was compared to the rest of adivsors (all data points)
+ 
+This example demonstrates how information from the news event (latest update to Wikipedia page) transformed and 
+resulted in visualiztion about significance of the Flynn's resignation in light of historical record of the rest of
+NSC advisors. Below I dissect this process step-by-step with explanations and code snippets in R. Actual document
+you read resulted from [R Notebook](http://rmarkdown.rstudio.com/r_notebooks.html) script that automated this process from the beginning to the end.  
+
+## Web Page as Data Source
+
+If you found some data to work with on internet embedded inside a web page chances are it looks similar to this 
+table [List of National Security Advisors](https://en.wikipedia.org/wiki/National_Security_Advisor_(United_States)#List_of_National_Security_Advisors) found inside [National Security Advisor (United States)](https://en.wikipedia.org/wiki/National_Security_Advisor_(United_States)) Wikipedia page:
+
+![Figure 2. Screenshot of the Table with List of National Security Advisors (Wikipeida).](../graphics/NSC-advisor-screenshot-border-1.jpg)
+
+The image above is typical Wikipedia page displayed by a browser - it contains table with data we are interested in. 
+To gain access to this table with data R program must do exactly the same steps that browser did to display it:
+
+ 1. retrieve HTML page using HTTP protocol's *GET* command
+ 2. parse HTML page to extract its elements including table data
+
+As almost with anything in R there are many ways to accomplish a certin task. For the tasks above we chose
+packages **httr** and **XML** both available from CRAN to accomplish the following (listed in order they apply):
+
+ 1. Using **httr** execute HTTP *GET* method that retrieves HTML page from Wikipedia
+ 2. Using **XML** parse HTML into list of elements representing HTML tree
+ 3. Using **XML** read table elements including **List of National Security Advisors** to the list with R dataframes
+ 4. Idenitfy and extract dataframe with **List of National Security Advisors** table data
+ 
+ 
+### Step 1: execute HTTP *GET* method
+```{r Retrieve HTML page, results='markup'}
+library(httr)
+
+secAdvisors = GET(
+  "https://en.wikipedia.org/",
+  path="wiki/National_Security_Advisor_(United_States)"
+)
+class(secAdvisors)
+```
+Resulting object `secAdvisors` (class `"response"`) contains all information resulted in GET 
+command against the Wikipedia URL "https://en.wikipedia.org/wiki/National_Security_Advisor_(United_States)"
+including HTML inside `content` element: 
+```{r HTML page summary, results='markup'}
+summary(secAdvisors)
+```
+
+### Step 2: parse HTML tree
+```{r Parse HTML Tree, results='markup'}
+library(XML)
+
+htmlTree = htmlParse(content(secAdvisors, "text"), asText = TRUE)
+class(htmlTree)
+```
+Resulting object `htmlTree` contains all parsed HTML elements including 3 `table`s:
+```{r HTML tree summary, results='markup'}
+summary(htmlTree)
+```
+
+### Steps 3 and 4: read table elements from HTML tree and extract table data into dataframe
+Next we find and extract `table` data into list with 3 dataframes and save 2d datafrme that contains 
+historical data with all NSC advisors:
+```{r Read Table Data, results='markup'}
+secAdvisorsTables = readHTMLTable(htmlTree, stringsAsFactors=FALSE)
+
+advisors = secAdvisorsTables[[2]]
+head(advisors)
+```
+After inspecting it we confirmed that it does contain **List of National Security Advisors** table
+from the wiki page.
+
+## Fixing Data
+At this point all data from Wikipedia we intend to use reside inside dataframe `advisors` (see above).
+Unfortunately, like any online data source such information is almost never 100% ready for analysis for
+several reasons:
+
+ 1. some columns are irrelevant or contain no information
+ 2. some rows are irrelevant, incomplete, or contain no information
+ 3. column names may be meaningless or empty
+ 4. data is dirty
+ 
+Before taking on the task of fixing data always review dataframe with convinient `utils::View` function: 
+```{ r View dataframe, results='hide'}
+View(advisors)
+```
+ 
+### Problems 1: irrelevant columns
+
+After reviewing we can narrow down to the set of just 3 columns: `V3, V4, V5` (for the sake
+of exercise let's ignore column containing number of days):
+```{r Irrelevant Columns Cleanup, results='markup'}
+advisors = advisors[,3:5]
+```
+
+### Problem 2: empty rows
+There are several ways to deal with empty rows and using `complete.cases` function
+is the most straight forward:
+```{r Empty Rows Cleanup, results='markup'}
+advisors = advisors[complete.cases(advisors), ]
+```
+
+### Problem 3: renaming columns
+Renaming columns 3, 4, and 5 to the meaningful names *advisor, from, to*:
+
+```{r Renaming Columns Cleanup, results='markup'}
+names(advisors) = c('advisor','from','to')
+
+head(advisors)
+```
+
+### Problem 4: cleaning up dirty data
+
+Dirty data may transpire in many forms and shapes. Observe these 4 rows, for example:
+```{r Dirty data example, results='markup'}
+head(advisors[21:24,])
+```
+
+and note footnotes appended to some of the values in each column. Keeping such footnotes would render 
+advisors' names not presentable and dates invalid. Unfortunately, there is no single recipe to deal with
+dirty data and custom code is required. The following application of `lapply` function on dataframe 
+removes footnotes everwhere:
+```{r Removing footnotes, results='markup'}
+advisors[] = lapply(advisors, FUN=function(x) {
+  ifelse(regexpr('[', x, fixed = TRUE)>0,
+         substr(x, 1, regexpr('[', x, fixed = TRUE)-1), 
+         x)
+})
+
+head(advisors[21:24,])
+```
+
+## Engineering Data
+At this point our original Wikipedia table contains all data we need for analysis removed from any 
+artifacts of its HTML origin. But it is not ready for analysis and visualization just yet. 
+Indeed, our dates are still strings and advisor tenures are missing.
+
+### Data type conversion
+Data that required some cleanup is likely still stored as strings even as it may contain numbers, dates, time, or currency.
+In our case both columns `from` and `to` contain dates but are still strings. Again, having many ways to parse and
+convert strings to dates in R we chose to use package **lubridate**:
+```{r Date Conversion, message=FALSE, warning=FALSE}
+library(lubridate)
+
+# remove currently functioning advisor (last one)
+advisors = advisors[-(dim(advisors)[[1]]:(dim(advisors)[[1]]-1)),]
+advisors$from_date = mdy(advisors$from)
+advisors$to_date = mdy(advisors$to)
+
+head(advisors)
+```
+Notice that we had to remove ~~a row containing currently active advisor~~ 2 rows with interim 
+advisor Keith Kellogg and current advisor designate H.R. McMaster because
+they their terms contain invalid strings inside `to` column but more importantly neither is relevant
+for this analysis.
+
+### Constructing New Columns
+The ooriginal data often is not all the data fed to analytics and visualization steps.
+Having start and end dates tells us how long the term was but not explicitly. To simplify 
+analysis and visualization later on let's derive number of days for each term as new column `days`: 
+```{r Data Engineering}
+advisors$days = 
+  apply(advisors[,c('from_date','to_date')], 1, FUN=function(x) {
+    length(seq(as.Date(x[[1]]), as.Date(x[[2]]), by='day'))
+  })
+
+head(advisors)
+```
+Sometimes new data sources required to construct more elobarate data before analysis begins. Then likely 
+data from multiple sources are consolidted into single analytical dataset. For simplicity this example doesn't 
+go that far (mulitple data sources), but engineering new data as simple or complex it might be is both necessary
+and important step towards final result.
+
+## Visualizing Michael Flynn Term as NSC Advisor
+The table with advisors contain their names together with how long their terms were (in days).
+Abrupt resignation of Michael Flynn sets new record by administration for the shortest
+such term. But how much shorter should become evident from the visualization. Using
+`ggplot2` package is de facto standard for R but more importantly its API transforms
+building and refining visualization into iterative and intuitive exercise.
+
+### First Take
+We begin with quick basic bar chart which will serve as a starting point 
+so we can immediately move to addressing problmes and making refinements.
+```{r Prototyping Visualization, fig.width=7, fig.height=7, echo=TRUE, message=FALSE, include=TRUE, fig.cap="Figure 3. Basic Bar Chart."}
+library(ggplot2)
+
+ggplot(advisors) +
+  geom_bar(aes(x=advisor, y=days), stat = 'identity', color='black', fill='white') +
+  coord_flip()
+```
+
+The only unneccessary customization above was adding `coord_flip` to swap positions
+of the `x` and `y` coordinates which positions bars in bar chart horizontally and 
+not vertically.
+
+### Custom Data Transformations
+Before getting down to business of refining looks and aesthetics notice that there are 2 data points
+containing multiple bars: **Robert Cutler** and **Brent Scowcroft**. After reviewing NSC advisor
+table we find that they actually served as advisors multiple times and hence their terms 
+appear together based on default position `stack`. Unfotunately, there is no easy way 
+to address this problem with `ggplot2` (which I know of) so for their terms to appear
+as separate data points let's resort to some custom but rather trivial transformations:
+```{r Splitting Terms Delta, echo=TRUE, results="hide"}
+advisors[advisors$advisor %in% c('Robert Cutler','Brent Scowcroft'),1] =
+  paste(advisors[advisors$advisor %in% c('Robert Cutler','Brent Scowcroft'),1], '-', rep(c('I','II'),2))
+```
+Both `Robert Cutler` and `Brent Scowcroft` appear twice for each of their 2 terms:
+```{r Splitting Terms, fig.width=7, fig.height=7, echo=FALSE, message=FALSE, include=TRUE, fig.cap="Figure 4. Basic Bar Chart after Splitting Bars with Multiple Terms."}
+ggplot(advisors) +
+  geom_bar(aes(x=advisor, y=days), stat = 'identity', color='black', fill='white') +
+  coord_flip()
+```
+
+### Making Certain Data Point Stand Out
+Since Michael Flynn tenure is of singular interest of the exercise
+his name  should stand out in bold and different color (would red be appropriate?).
+To accomplish this simple transformation and new flag attribute suffice:
+```{r Point Stands Out, fig.width=7, fig.height=7, echo=TRUE, message=FALSE, include=TRUE, fig.cap="Figure 5. Making Data Point Stand Out."}
+advisors$isFlynn = ifelse(advisors$advisor == 'Michael Flynn', TRUE, FALSE)
+
+ggplot(advisors) +
+  geom_bar(aes(x=advisor, y=days), stat = 'identity', color='black', fill='white') +
+  coord_flip() +
+  theme(axis.text.y = element_text(colour=ifelse(advisors$isFlynn,
+                                                 'red','black'),
+                                   face=ifelse(advisors$isFlynn,
+                                               'bold','plain')))
+```
+
+### Properly Ordering by Length of Tenure
+Why not Michael Flynn name is in red? The answer is while the `geom_bar` uses alphabetical order of
+its `x = advisor` `isFlynn` vector keeps original order inherited from dataframe `advisors`. Such
+inconsistency needs us to sort these things out - literally:
+```{r Flynn Stands Out Delta, echo=TRUE, results="hide"}
+advisors = advisors[order(advisors$days), ]
+advisors$advisor = factor(advisors$advisor, levels=advisors$advisor[order(advisors$days)], ordered = TRUE)
+```
+
+```{r Flynn Stands Out, fig.width=7, fig.height=7, echo=FALSE, message=FALSE, include=TRUE, fig.cap="Figure 6. Reordeing Bars in Bar Chart."}
+ggplot(advisors) +
+  geom_bar(aes(x=advisor, y=days), stat = 'identity', color='black', fill='white') +
+  coord_flip() +
+  theme(axis.text.y = element_text(colour=ifelse(advisors$isFlynn,
+                                                 'red','black'),
+                                   face=ifelse(advisors$isFlynn,
+                                               'bold','plain')))
+```
+
+### Fill the Bars with Color to Distinguish Flynn Even More
+As Flynn name stands out in red its bar should too. Using `fill` aesthetic 
+and custom coloring schema defined with `scale_fill_manual` achieves exactly
+that:
+```{r Flynn Bar Stands Out, fig.width=7, fig.height=7, echo=FALSE, message=FALSE, include=TRUE, fig.cap="Figure 7. Adding More Color in Bar Chart."}
+ggplot(advisors) +
+  geom_bar(aes(x=advisor, y=days, fill=isFlynn), stat = 'identity') +
+  scale_fill_manual(values=c("#3C3B6E","#B22234"), guide=FALSE) +
+  coord_flip() +
+  theme(axis.text.y = element_text(colour=ifelse(advisors$isFlynn,
+                                                 "#B22234","#3C3B6E"),
+                                   face=ifelse(advisors$isFlynn,
+                                               'bold','plain')))
+```
+
+### Final Refinements
+Finally, we add the following elements and adjust some of its properties:
+
+ * Title, subtitle and axis labels
+ * Theme using package `ggthemes`
+ * Larger font and left adjustment for the names of advisors
+ 
+```{r Final Visualization, fig.width=7, fig.height=7, echo=TRUE, message=FALSE, include=TRUE, fig.cap="Figure 7. Final Version of Bar Chart."}
+library(ggthemes)
+
+ggplot(advisors) +
+  geom_bar(aes(advisor, days, fill=isFlynn), stat = 'identity') +
+  scale_fill_manual(values=c("#3C3B6E","#B22234"), guide=FALSE) +
+  coord_flip() +
+  labs(title="Michael Flynn's 25 Days vs. The Rest", 
+       subtitle="The National Security Advisors since 1953\nSource: https://goo.gl/rrWmeS © 2017 Gregory Kanevsky Infographics.", 
+       y="Days in Office", x=NULL) +
+  theme_tufte(base_size = 16, ticks = FALSE) +
+  theme(axis.text.y = element_text(size=16, hjust = 0, 
+                                   colour=ifelse(advisors$isFlynn,
+                                                 "#B22234","#3C3B6E"),
+                                   face=ifelse(advisors$isFlynn,
+                                               'bold','plain')))
+```
+
