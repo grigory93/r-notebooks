@@ -1,0 +1,600 @@
+---
+title: "Dallas Animal Shelter Data - Exploratory and Survival Analysis"
+author: "Gregory Kanevsky"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document: default
+---
+![](../graphics/dallas-animal-shelters-multiple-dog-monthly-trends-sankey.png)
+```{r Setup and Functions, cache=FALSE, include=FALSE, echo=FALSE}
+library(lubridate)
+library(stringr)
+library(tidyr)
+library(dplyr)
+library(RSocrata)
+library(survival)
+library(ggplot2)
+library(ggthemes)
+library(scales)
+library(gridExtra)
+library(grid)
+library(networkD3)
+library(igraph)
+library(htmlwidgets)
+
+createIntakeToOutcomeSankey <- function(data, forAnimal,
+                                        ins = c("CONFISCATED","OWNER SURRENDER","STRAY"),
+                                        outs = c("ADOPTION","EUTHANIZED","RETURNED TO OWNER","TRANSFER")) {
+  net.df = data %>%
+    filter(animal == forAnimal) %>%
+    mutate(type = as.character(type),
+         outcome = as.character(outcome),
+         type = ifelse(type %in% ins, type, "OTHER INTAKES"),
+         outcome = ifelse(outcome %in% outs, outcome, "OTHER OUTCOMES")) %>%
+    group_by(type, outcome) %>%
+    summarise(value=n()) %>%
+    ungroup()
+  
+  net = igraph_to_networkD3(graph_from_data_frame(net.df, directed=TRUE))
+  widget = sankeyNetwork(Links = net$links, Nodes = net$nodes, Source = "source",
+              Target = "target", Value = "value", NodeID = "name",
+              units = "count", fontSize = 16, nodeWidth = 15)
+  
+  return(widget)
+}
+
+computeAndCreateCorrelations <- function(model.data.dogscats, forAnimal, excludeDate = '2017-08-01',
+                                         ins = c("IN:CONFISCATED","IN:OWNER SURRENDER","IN:STRAY"),
+                                         outs = c("OUT:ADOPTION","OUT:EUTHANIZED","OUT:RETURNED TO OWNER","OUT:TRANSFER")) {
+  data = bind_rows(
+  model.data.dogscats %>%
+    group_by(animal, monthly_in, type) %>%
+    summarise(
+      n = n(),
+      group = 'in'
+    ) %>%
+    complete(animal, type, monthly_in, fill=list(n=0)) %>%
+    mutate(type = paste0("IN:",type)) %>%
+    filter(type %in% ins) %>%
+    rename(monthly = monthly_in, 
+           in_out_type = type),
+  model.data.dogscats %>%
+    group_by(animal, monthly_out, outcome) %>%
+    summarise(
+      n = n(),
+      group = 'out'
+    ) %>%
+    complete(animal, outcome, monthly_out, fill=list(n=0)) %>%
+    mutate(outcome = paste0("OUT:",outcome)) %>%
+    filter(outcome %in% outs) %>%
+    rename(monthly = monthly_out,
+           in_out_type = outcome)
+  ) %>%
+    mutate(in_out_typeshort = str_replace(in_out_type, "(IN:|OUT:)", ""))
+    
+
+  plots = list(length(ins)*length(outs))
+  cormat = data.frame(x=character(0), y=character(0), value=numeric(0),
+                    stringsAsFactors = FALSE)
+  i = 0
+  for(intype in ins)
+    for(outtype in outs) {
+      i = i + 1
+      p = ggplot(data[data$animal == forAnimal & 
+                      data$monthly != excludeDate &
+                      (data$in_out_type == intype | data$in_out_type == outtype), ]) +
+        geom_line(aes(monthly, n, group=in_out_type, color=in_out_type), size=1.2) +
+        labs(x=NULL, y=switch(i%%4+1,NULL,'Totals',NULL), title=NULL) +
+        scale_color_solarized(name=NULL, labels=str_replace(c(intype, outtype), "(IN:|OUT:)", "")) +
+        theme_minimal(base_size = 16, base_family = 'serif') +
+        theme(legend.position="bottom",
+            axis.text.x = element_text(angle=0, hjust=0.5),
+            legend.text = element_text(size=10))
+      plots[[i]] = p
+    
+      cordata = cbind(left=data[data$animal == forAnimal & 
+                      data$monthly != excludeDate &
+                      data$in_out_type == intype, 'n'],
+                    right=data[data$animal == forAnimal & 
+                      data$monthly != excludeDate &
+                      data$in_out_type == outtype, 'n'])
+      cormat = rbind(cormat,
+                   data.frame(x=intype, y=outtype, value=cor(cordata)[[1,2]],
+                              stringsAsFactors = FALSE))
+    }
+
+  return(list(cormat, plots))
+}
+
+createCorrMatrix <- function(cormat, title, legend.position="bottom") {
+  cormat$x = factor(cormat$x, levels = c("IN:STRAY","IN:OWNER SURRENDER","IN:CONFISCATED"), 
+                ordered = TRUE)
+  cormat$y = factor(cormat$y)
+  p = ggplot(data = cormat) + 
+    geom_tile(aes(x=y, y=x, fill=value)) +
+    geom_text(aes(y, x, label = round(cormat$value, 2)), color = "black", size = 8, family='mono', fontface="bold") +
+    scale_fill_gradient_tableau(name='Correlation',palette = 'Red') +
+    labs(title=title,
+       subtitle="Monthly Trends Correlations", 
+       x=NULL, y=NULL, caption=caption) +
+    theme_minimal(base_size = 16, base_family = 'serif') +
+    theme(axis.text = element_text(size=12, face='bold'),
+          axis.text.x = element_text(angle = 330, hjust=0.10, vjust=1),
+          axis.text.y = element_text(hjust = 1.1),
+          legend.position = legend.position,
+          plot.caption = element_text(size = 10, hjust=1))
+  
+  return(p)
+}
+
+createSurvivalCurve <- function(surv.data, feature, len, threshold = 100, 
+                                title="Cats and Dogs",
+                                subtitle="Survival Probabilities in Dallas Animal Shelters, FY 2015-2017",
+                                caption=NULL, legend.position = "none", legend.title=feature,
+                                scale_color = scale_color_solarized(name=legend.title),
+                                theme = theme_minimal(base_family = 'serif')) {
+  feature.fac = as.factor(c(rep(str_sub(names(surv.data$strata), len), surv.data$strata)))
+  df = data.frame(surv = surv.data$surv, time = as.integer(surv.data$time/24), strata = feature.fac)
+
+  ggplot(data = df[df$time < threshold,], aes(x = time, y = surv)) + 
+    geom_step(aes(colour = strata), size=1.5) +
+    scale_color + 
+    labs(x="Days in Shelter", y="Survival Probability",
+         title=title,
+         subtitle=subtitle,
+         caption=caption) +
+    theme +
+    theme(legend.position = legend.position,
+          plot.caption = element_text(size = 10, hjust=1),
+          axis.title = element_text())
+}
+
+createSurvivalHistogram <- function(data, feature, threshold = 100, title=NULL,
+                                    subtitle="Accepted Animal Totals by Outcome",
+                                    caption=NULL, legend.title = "Animal", legend.position = "right",
+                                    scale_fill = scale_fill_solarized(name=legend.title),
+                                    theme = theme_minimal(base_family = 'serif')) {
+  
+  event_names = c(`1`="Not Survived", `0`="Survived")
+  
+  data$time = as.integer(data$hours/24)
+  ggplot(data=na.omit(data[data$time < threshold,])) +
+    geom_bar(aes_string(feature, fill=feature)) +
+    facet_wrap(~event, ncol=1, labeller = as_labeller(event_names)) +
+    scale_fill + 
+    coord_flip() +
+    labs(x=NULL, y=NULL, title=title, subtitle=subtitle, caption=caption) +
+    theme +
+    theme(legend.position = legend.position,
+          axis.text.y = element_blank(),
+          plot.caption = element_text(size = 10, hjust = 0))
+}
+
+caption = paste("Source: https://goo.gl/xCVUFT ©",year(today()),"Gregory Kanevsky Infographics.")
+
+```
+
+## Loading Dallas OpenData datasets
+[Dallas OpenData](https://www.dallasopendata.com/) distributes animal shelter records in separate datasets for each fiscal year from 2015 through 2017 (2017 gets daily updates in 2017):
+
+  * [FY 2015 Dallas Animal Shelter](https://www.dallasopendata.com/City-Services/FY-2015-Dallas-Animal-Shelter-Data/4j5h-8vay). This dataset reports activities between October 01, 2014 and September 30, 2015.
+  * [FY 2016 Dallas Animal Shelter Data](https://www.dallasopendata.com/City-Services/FY-2016-Dallas-Animal-Shelter-Data/bg5d-mj5u). This dataset reports activities between October 01, 2015 and September 30, 2016.
+  * [FY 2017 Dallas Animal Shelter Data](https://www.dallasopendata.com/City-Services/FY-2017-Dallas-Animal-Shelter-Data/sjyj-ydcj). The start date is October 1, 2016.
+
+### Access to Dalla OpenData Datasets
+Dallas OpenData is powered by Socrata and its [Open Data Network](https://socrata.com/blog/socrata-introduces-open-data-network/) that supports [Socrata Open Data API](https://dev.socrata.com/) (SODA API). Package [RSocrata](https://github.com/Chicago/RSocrata) supports SODA API and variety of data sources including public Dallas OpenData without neither access credentials nor API token:
+```{r Data Load, cache=TRUE}
+library(RSocrata)
+
+data15.source = read.socrata(url = "https://www.dallasopendata.com/resource/8pn8-24ku.csv")
+data16.source = read.socrata(url = "https://www.dallasopendata.com/resource/4qfv-27du.csv")
+data17.source = read.socrata(url = "https://www.dallasopendata.com/resource/8849-mzxh.csv")
+```
+
+### Preprocessing Data Files
+File format slightly changed after 2016 so we process 2015 and 2016 first and then 2017 into two separate data frames:
+```{r Data Preprocessing, cache=TRUE}
+library(lubridate)
+library(stringr)
+library(tidyr)
+library(dplyr)
+
+# 2015 and 2016
+data15n16 = bind_rows(data15.source, data16.source) %>%
+  rename(months=month) %>%
+  filter(!is.na(outcome_date) | intake_total != 1) %>%
+  select(-kennel_number, -kennel_status, -tag_type, -activity_number, 
+         -source_id, -staff_id, -hold_request, 
+         -receipt_number, -impound_number, -service_request_number,
+         -intake_total) %>%
+  separate(intake_time, c("Intake.Fake.Date","Intake.Real.Time"), sep=10, remove=FALSE) %>%
+  separate(outcome_time, c("Outcome.Fake.Date","Outcome.Real.Time"), sep=10, remove=FALSE) %>%
+  mutate(intake_ts = ymd_hms(paste(intake_date, Intake.Real.Time), tz="America/Chicago"),
+         outcome_ts = ymd_hms(paste(outcome_date, Outcome.Real.Time), tz="America/Chicago")) %>%
+  select(-Intake.Real.Time, -Intake.Fake.Date, -Outcome.Real.Time, -Outcome.Fake.Date,
+         -intake_time, -intake_date, -outcome_time, -outcome_date)
+
+# format in 2017 is slightly different
+data17 = filter(data17.source, !is.na(outcome_date)) %>%
+  select(-kennel_number, -kennel_status, -tag_type, -activity_number, 
+         -source_id, -staff_id, -hold_request, 
+         -receipt_number, -impound_number, -service_request_number) %>%
+  separate(intake_time, c("Intake.Real.Time", "Intake.Time.Seconds"), sep=8, remove=FALSE) %>%
+  separate(outcome_time, c("Outcome.Real.Time", "Outcome.Time.Seconds"), sep=8, remove=FALSE) %>%
+  mutate(intake_ts = ymd_hms(paste(intake_date, Intake.Real.Time), tz="America/Chicago"),
+         outcome_ts = ymd_hms(paste(outcome_date, Outcome.Real.Time), tz="America/Chicago")) %>%
+  select(-Intake.Real.Time, -Intake.Time.Seconds, -Outcome.Real.Time, -Outcome.Time.Seconds,
+         -intake_time, -intake_date, -outcome_time, -outcome_date)
+```
+
+For each the following actions took place:
+ 
+ * records with empty outcome date were removed (these are not censored records but rather animals that were just admitted and are still held in shelter);
+ * records with total intake count other than 1 were removed (it is not clear what they represent);
+ * irrelevant attributes were removed;
+ * original data contains a pair of fields for each timestamp attribute: date and time. Thus, each such pair is transofrmed into single attribute (times for admission (intake) and outcome) using function **separate** and **mutate**;
+ * removed temporary attributes created in previous step with function **separate**.
+
+### Combining and Compacting Data
+
+#### Binding 2015 - 2017 FY Data Together
+Next we combine three years of data (2 data frames) into single data frame (cat and dog animals only): 
+```{r CombineFYs, cache=TRUE}
+# combine all years into single dataset
+model.data.all = bind_rows(data15n16, data17) %>%
+  mutate(
+    animal = factor(animal_type),
+    outcome = factor(outcome_type),
+    breed = factor(animal_breed),
+    tract = factor(census_tract),
+    district = factor(council_district),
+    type = factor(intake_type),
+    subtype = factor(intake_subtype),
+    condition_in = factor(intake_condition),
+    condition_out = factor(outcome_condition),
+    chip = factor(chip_status),
+    origin = factor(animal_origin))
+```
+
+#### What are the Animals?
+Which animal types and how many are treated by Dallas shelters?
+```{r Animals, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
+data = model.data.all %>%
+  filter(animal != '') %>%
+  group_by(animal) %>%
+  summarize(count=n()) %>%
+  arrange(-count) %>% 
+  mutate(animal = factor(animal, animal, ordered=TRUE))
+
+ggplot(data) +
+  geom_bar(aes(animal, count, fill=animal), stat='identity') +
+  scale_fill_solarized(name=NULL) +
+  scale_y_continuous(labels = comma) +
+  labs(title="Admissions by Animal Types",
+       subtitle="Dallas Animal Shelters, FY 2015-2017",
+       caption = caption, x=NULL, y=NULL) +
+  theme_minimal(base_size = 16, base_family = 'serif') +
+  theme(legend.position = "none",
+        axis.text.x = element_text(face='plain',angle=310,hjust=0),
+        plot.caption = element_text(size = 10, hjust=1))
+```
+
+### Retaining Dog and Cat Animal Records Only
+```{r DogsAndCatsAnimals, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
+model.data.dogscats = model.data.all %>%
+  filter(animal_type %in% c("DOG","CAT")) %>%
+  mutate(animal = droplevels(animal))
+    
+levels(model.data.dogscats$animal) = c("Cats","Dogs")
+```
+
+#### Combining records of stay for the same animals
+
+Some records occur for the same animal in sequence and in short time intervals. In such case We assume such records correspond to single shelter stay so they need additional processing. The rule of thumb is if 2 records for the same animal (**animal_id**) are within 30 days from each other then they are assigned phases that represent the same shelter stay: 
+```{r Phases, cache=TRUE}
+# find and assign phases to consecutive records for the same stay:
+model.data.dogscats = group_by(model.data.dogscats, animal_id) %>%
+  arrange(intake_ts) %>%
+  mutate(n=n(),
+         phase = row_number(),
+         lag_time = intake_ts - lag(outcome_ts)) %>%
+  ungroup() %>%
+  arrange(animal_id, phase) %>%
+  mutate(phase_group = ifelse(lag_time <= 30, lag(phase), phase),
+         phase_group = ifelse(lag_time <= 30, lag(phase_group), phase),
+         phase_group = ifelse(is.na(phase_group), 1, phase_group),
+         groupid = paste(animal, animal_id, phase_group, sep="-"))
+```
+The code above is crude attempt at sequential pattern processing like SQL function **npath** in Teradata Aster. 
+
+Having identified records for the same stay we can compact them into single records:
+```{r Sessionize, cache=TRUE}
+# combine mutlple records for the same animal stay into single record
+model.data.dogscats = model.data.dogscats %>%
+  group_by(groupid) %>%
+  summarise(
+    intake_ts = min(intake_ts),
+    outcome_ts = max(outcome_ts),
+    interval = interval(min(intake_ts), max(outcome_ts)),
+    duration = as.duration(interval),
+    hours = as.numeric(duration)/(60.*60.),
+    animal=first(animal),
+    outcome = last(outcome),
+    breed = first(breed),
+    tract = first(tract),
+    district = first(district),
+    type = first(type),
+    subtype = first(subtype),
+    condition_in = first(condition_in),
+    condition_out = last(condition_out),
+    chip = first(chip),
+    origin = first(origin),
+    phase = min(phase)) %>%
+  mutate(monthly_in = floor_date(intake_ts, 'month'),
+         monthly_out = floor_date(outcome_ts, 'month'))
+
+
+ 
+# when testing 
+# file="../data/Dallas_Animal_Shelter_Data2015-2017.Rda"
+# saveRDS(model.data, file=file) 
+# model.data = readRDS(file=file)
+```
+
+## Exploratory Analysis
+
+### Intake Types
+```{r Intake Types, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
+data = model.data.dogscats %>% 
+  group_by(animal, type) %>%
+  summarise(count = n()) %>%
+  arrange(desc(animal), -count) %>% 
+  mutate(type = factor(type, type, ordered=TRUE))
+
+ggplot(data) +
+  geom_bar(aes(type, count, fill=type), stat='identity') +
+  facet_wrap(~animal, ncol = 1, scales = "free_y") +
+  scale_fill_solarized(name=NULL) +
+  scale_y_continuous(labels = comma) +
+  labs(title="Admissions by Intake Types",
+       subtitle="Dallas Animal Shelters, FY 2015-2017",
+       caption=caption, x=NULL, y=NULL) +
+  theme_minimal(base_size = 16, base_family = 'serif') +
+  theme(legend.position = "none",
+        axis.text.x = element_text(face='plain',angle=310,hjust=0),
+        plot.caption = element_text(size = 10, hjust=1))
+```
+
+### Outcomes
+```{r Outcomes, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
+data = model.data.dogscats %>%
+  group_by(animal, outcome) %>%
+  summarise(count = n()) %>%
+  arrange(desc(animal), -count) %>%
+  mutate(outcome = factor(outcome, outcome, ordered=TRUE))
+  
+ggplot(data) +
+  geom_bar(aes(outcome, count, fill=outcome), stat='identity') +
+  facet_wrap(~animal, ncol = 1, scales = "free_y") +
+  scale_fill_solarized(name=NULL) +
+  scale_y_continuous(labels = comma) +
+  labs(title="Releases by Outcomes",
+       subtitle="Dallas Animal Shelters, FY 2015-2017",
+       caption=caption, x=NULL, y=NULL) +
+  theme_minimal(base_size = 16, base_family = 'serif') +
+  theme(legend.position = "none",
+        axis.text.x = element_text(face='plain',angle=310,hjust=0),
+        plot.caption = element_text(size = 10, hjust=1))
+```
+
+## Transitions between Intake types and Outcomes
+Sankey diagram will show how dogs addmitted to shelters transition from intake types to outcomes with arrows of variable width corresponding to number of records. Essentially, this diagram shows probabilities: absolute probabilities of dog admitted by intake types and discharged by outcomes, and conditional probabilities of dog discharged with outcomes given its admission with an intake type:
+
+### Cats
+
+```{r SankeyCats, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
+createIntakeToOutcomeSankey(model.data.dogscats, "Cats")
+```
+
+### Dogs 
+
+```{r SankeyDogs, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
+createIntakeToOutcomeSankey(model.data.dogscats, "Dogs")
+```
+
+## Correlations
+Next, we would like to correlate intake types with outcomes. For that we devise monthly trends for both and correlate resulting time series - the total of 12 combinations of 3 intake types and 4 outcommes:
+```{r Compute correlation matrix, cache=FALSE, echo=FALSE}
+result = computeAndCreateCorrelations(model.data.dogscats, 'Cats', excludeDate = '2017-09-01')
+cormat.cats = result[[1]]
+plots.cats = result[[2]]
+
+result = computeAndCreateCorrelations(model.data.dogscats, 'Dogs', excludeDate = '2017-09-01')
+cormat.dogs = result[[1]]
+plots.dogs = result[[2]]
+```
+
+```{r Correlation matrix, cache=FALSE, echo=FALSE, fig.width=10, fig.height=6}
+createCorrMatrix(cormat.cats, title="Cats: Intake Types vs. Outcomes",
+                 legend.position = "none")
+createCorrMatrix(cormat.dogs, title="Dogs: Intake Types vs. Outcomes",
+                 legend.position = "none")
+```
+
+## Trend Matrix
+Now correlation coefficients get replaced with actual times series used to compute them leaving matrix structure intact:
+```{r CatsTrendMatrix, cache=FALSE, echo=FALSE, fig.width=10, fig.height=6}
+# Trend Matrix 
+grid.arrange(plots.cats[[1]], plots.cats[[2]], plots.cats[[3]],
+             plots.cats[[4]], plots.cats[[5]], plots.cats[[6]],
+             plots.cats[[7]], plots.cats[[8]], plots.cats[[9]],
+             plots.cats[[10]], plots.cats[[11]], plots.cats[[12]],
+             ncol=4, 
+             bottom=textGrob(caption,gp=gpar(fontsize=10,fontfamily='serif'),just="left"),
+             top=textGrob("Cats Monthly Trends: Intake Types vs. Outcomes", gp=gpar(fontsize=18, fontfamily='serif'), just="right"))
+```
+
+```{r DogsTrendMatrix, cache=FALSE, echo=FALSE, fig.width=10, fig.height=6}
+grid.arrange(plots.dogs[[1]], plots.dogs[[2]], plots.dogs[[3]],
+             plots.dogs[[4]], plots.dogs[[5]], plots.dogs[[6]],
+             plots.dogs[[7]], plots.dogs[[8]], plots.dogs[[9]],
+             plots.dogs[[10]], plots.dogs[[11]], plots.dogs[[12]],
+             ncol=4, 
+             bottom=textGrob(caption,gp=gpar(fontsize=10,fontfamily='serif'),just="left"),
+             top=textGrob("Dogs Monthly Trends: Intake Types vs. Outcomes", gp=gpar(fontsize=18, fontfamily='serif'), just="right"))
+```
+
+## The Kaplan-Meier survival curves
+
+### Survival Curves by Animal Types - Dogs vs. Cats
+```{r, cache=FALSE}
+survival.data = model.data.dogscats %>%  
+  filter(hours < 2500) %>%
+  mutate(event = ifelse(outcome %in% c('DIED','EUTHANIZED'), 1, 0),
+         unhealthy_in = ifelse(condition_in ==  'HEALTHY', 'NO', 'YES'),
+         contagious_in = ifelse(is.na(str_match(condition_in, ' CONTAGIOUS$')[,1]), 'NO','YES'),
+         treatable_in = ifelse(is.na(str_match(condition_in, '^TREATABLE ')[,1]), 'UNTREATABLE',
+                               ifelse(is.na(str_match(condition_in, 'MANAGEABLE')[,1]),
+                                      'REHABILITABLE', 'MANAGEABLE')))
+```
+
+```{r, cache=FALSE, fig.width=8, fig.height=6}  
+km.animal = survfit(Surv(hours, event) ~ animal, data=survival.data)
+
+p1 = createSurvivalCurve(km.animal, "Animal", nchar("animal")+2)
+p2 = createSurvivalHistogram(survival.data, "animal", caption=caption)
+grid.arrange(p1, p2, heights=c(3.5/5, 1.5/5), ncol=1)
+```
+
+Again, for consistency and plausability of analysis will focus on survival of dogs from here on.
+```{r, cache=FALSE}
+survival.data.dogs = survival.data %>%  
+  filter(
+    animal == 'Dogs',
+    outcome %in% c('ADOPTION','DIED','EUTHANIZED','FOSTER','FOUND REPORT',
+                  'LOST REPORT','RETURNED TO OWNER','TRANSFER'),
+    !type %in% c('FOSTER','FOUND REPORT','LOST REPORT','TRANSFER'),
+    !subtype %in% c('EUTHANASIA REQUESTED','- DEAD ON ARRIVAL',
+                    'QUARANTINE - DEAD ON ARRIVAL','KEEP SAFE - DEAD ON ARRIVAL',
+                    'CRUELT - DEAD ON ARRIVAL','DANGER - DEAD ON ARRIVAL'),
+    origin %in% c('FIELD','OVER THE COUNTER','SWEEP','NIGHT DROP')) 
+```
+
+### Survival Curves by Intake Types
+```{r, cache=FALSE, fig.width=8, fig.height=8}
+km.type = survfit(Surv(hours, event) ~ type, data=survival.data.dogs)
+p1 = createSurvivalCurve(km.type, "Dog Intake Type", nchar("type")+2,
+                    title="Dogs by Shelter Intake Type",
+                    legend.position = "none")
+
+p2 = createSurvivalHistogram(survival.data.dogs, "type", 
+                             subtitle="Accepted to Dallas Shelters Totals by Intake Type and Outcome",
+                             legend.position="right", caption=caption)
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+
+## Survival Curves by Dog Origin in Shelter
+```{r, cache=FALSE, fig.width=8, fig.height=8}
+km.origin = survfit(Surv(hours, event) ~ origin, data=survival.data.dogs)
+p1 = createSurvivalCurve(km.origin, "Dog Origin in Shelter", nchar("origin")+2,
+                    title="Dogs by Origin In Shelter", legend.position = "none")
+
+p2 = createSurvivalHistogram(survival.data.dogs, "origin", 
+                             subtitle="Accepted to Dallas Shelters Totals by Origin and Outcome",
+                             legend.position="right", caption = caption, legend.title = "Origin")
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+
+### Survival of Healthy vs. Unhealthy Dogs
+```{r, cache=FALSE, fig.width=8, fig.height=8}
+km.healthy = survfit(Surv(hours, event) ~ unhealthy_in, data=survival.data.dogs)
+p1 = createSurvivalCurve(km.healthy, "Dog Health In", nchar("unhealthy_in")+2,
+                    title="Dogs by Healthy vs. Unhealthy Condition In", legend.position = "none")
+
+p2 = createSurvivalHistogram(survival.data.dogs, "unhealthy_in", 
+                             subtitle="Accepted to Dallas Shelters Totals by Healthy Condition In and Outcome",
+                             legend.position="right", caption = caption, legend.title = "Unhealthy")
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+
+### Survival by Condition Entering Shelter
+```{r, cache=FALSE, fig.width=8, fig.height=8}
+km.condition = survfit(Surv(hours, event) ~ condition_in, data=survival.data.dogs)
+p1 = createSurvivalCurve(km.condition, "Dog Condition In", nchar("condition_in")+2,
+                    title="Dogs by Shelter Condition In", legend.position = "none")
+
+p2 = createSurvivalHistogram(survival.data.dogs, "condition_in", legend.position = "right",
+                             subtitle="Accepted to Dallas Shelters Totals by Condition In and Outcome",
+                             caption = caption, legend.title = "Condition")
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+
+Original attribute *condition_in* carries too much information for meaningful analysis. It can be broken down
+into several attributes:
+  
+  * Unhealthy (Yes/No)
+  * Contagious (Yes/No) (makes sense only in case of unhealthy dogs)
+  * Treatable (Untreatable/Manageable/Rehabilitable) (makes sense only in case of unhealthy dog)
+
+### Survival of Unhealthy Dogs by Contagious Condition In
+```{r, cache=FALSE, fig.width=8, fig.height=8}
+survival.data.dogs.unhealthy = survival.data.dogs %>%
+  filter(unhealthy_in == 'YES')
+
+km.contagious = survfit(Surv(hours, event) ~ contagious_in, data=survival.data.dogs.unhealthy)
+p1 = createSurvivalCurve(km.contagious, "Unhealthy Dogs Contagious Condition In", nchar("contagious_in")+2,
+                    title="Unhealthy Dogs by Contagious Condition In", legend.position = "none")
+
+p2 = createSurvivalHistogram(survival.data.dogs.unhealthy, "contagious_in", legend.position = "right",
+                             subtitle="Accepted to Dallas Shelters Unhealthy Dog Totals by Contagious Condition In and Outcome",
+                             caption = caption, legend.title = "Contagious")
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+
+### Survival of Unhealthy Dogs by Treatable Condition In
+```{r, cache=FALSE, fig.width=8, fig.height=7}
+km.contagious = survfit(Surv(hours, event) ~ treatable_in, data=survival.data.dogs.unhealthy)
+p1 = createSurvivalCurve(km.contagious, "Unhealthy Dogs Contagious Condition In", nchar("treatable_in")+2,
+                    title="Unhealthy Dogs by Treatable Condition In", legend.position = "none")
+
+p2 = createSurvivalHistogram(survival.data.dogs.unhealthy, "treatable_in", legend.position = "right",
+                             subtitle="Accepted to Dallas Shelters Unhealthy Dog Totals by Treatable Condition In and Outcome",
+                             caption = caption, legend.title = "Treatable")
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+
+## Survival Curves by Chip Scan
+```{r, cache=FALSE, fig.width=8, fig.height=7}
+km.scan = survfit(Surv(hours, event) ~ chip, data=survival.data.dogs)
+p1 = createSurvivalCurve(km.scan, "Chip Scan Result", nchar("chip")+2,
+                         title="Dogs by Chip Scan Result", legend.position = "none")
+
+p2 = createSurvivalHistogram(survival.data.dogs, "chip", legend.position = "right",
+                             subtitle = "Accepted to Dallas Shelters Totals by Chip Scan Result and Outcome",
+                             caption = caption, legend.title = "Chip Scan Result")
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+
+```{r, warning=FALSE}
+coxph.surv.mod = coxph(Surv(hours, event) ~ type + chip + origin + unhealthy_in, 
+                       data = survival.data.dogs,
+                       control = coxph.control(iter.max=100))
+summary(coxph.surv.mod)
+```
+
+```{r, warning=FALSE}
+coxph.surv.unhealthy.mod = coxph(Surv(hours, event) ~ type + chip + origin + contagious_in + treatable_in, 
+                       data = survival.data.dogs.unhealthy,
+                       control = coxph.control(iter.max=100))
+
+summary(coxph.surv.unhealthy.mod)
+```
