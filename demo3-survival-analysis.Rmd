@@ -1,0 +1,291 @@
+---
+title: "Survival Analysis with Aster and R - Churn Use Case"
+author: "Gregory Kanevsky"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r Setup and Functions, cache=FALSE, include=FALSE, echo=FALSE}
+library(TeradataAsterR)
+library(ggplot2)
+library(ggthemes)
+library(RColorBrewer)
+
+createHazardRatioPlot <- function(data, cat='category', value='exp_coef', xlab=NULL,
+                                  ylab = ifelse(value=='exp_coef', expression(exp(beta)), expression(beta)),
+                                  title=NULL, subtitle=NULL, base_size=14, angle=270) {
+  ggplot(data) +
+    geom_bar(aes_string(x=cat, y=value, fill=cat), stat = "identity") +
+    scale_fill_manual(values=colorRampPalette(solarized_pal()(8))(dim(data)[[1]])) +
+    geom_hline(aes(yintercept=ifelse(value=='exp_coef', 1, 0)), size=0.7, linetype="42") +
+    labs(title=title, subtitle=subtitle, y=ylab, x=xlab) +
+    theme_minimal(base_size = base_size, base_family = 'mono') +
+    theme(legend.position = "none",
+          axis.text.x = element_text(angle=angle, vjust = 0))
+}
+
+conn = ta.connect("PreSalesCluster1-dallas", database = "mike")
+
+masterView = 'p17.cust_metrics_summary_june2016'
+```
+
+## Feature Engineering for Survival Analysis
+With feature engineering we accomplish several tasks:
+
+  * Create special features for duration and event that correspond to survival length and outcome.
+  * Create more robust covariates for survival analysis such as sms message count in 100s, and
+    voice minutes to hours
+    
+```{r Feature Engineering, cache=TRUE, include=TRUE, echo=TRUE}
+customer.data.ta = ta.data.frame("cust_metrics_summary_june2016", schemaName = "p17")
+survival.columns = c('cust_id','plan','region','data_usage_avg','sms_usage_avg','voice_minutes_avg','cust_days',
+                     'close_dt','open_dt')
+survival.data.ta = ta.transform(customer.data.ta[, survival.columns],
+                                voice_24hours_avg = voice_minutes_avg / (24 * 60),
+                                sms100_usage_avg = sms_usage_avg / 100,
+                                duration = if(!is.null(close_dt)) close_dt - open_dt
+                                            else '1/31/2017' - open_dt,
+                                event = if(!is.null(close_dt)) 1 else 0)
+
+ta.dropTable("customers_for_coxph", schemaName = "p17")
+ta.create(survival.data.ta[, union(setdiff(survival.columns, c('close_dt','open_dt')), 
+                                   c('voice_24hours_avg','sms100_usage_avg','duration','event'))],
+          table = 'customers_for_coxph', schemaName = 'p17', 
+          tableType = 'fact', partitionKey = 'cust_id', row.names = TRUE,
+          colTypes = c(event='int'))
+
+
+customer.data.ta = ta.data.frame("customers_for_coxph", schemaName = "p17")
+```
+
+## Creating Survival Model
+
+```{r Survival Model, cache=FALSE, include=TRUE, echo=TRUE}
+all.features = setdiff(ta.colnames(customer.data.ta), 
+                       c("row_names", "cust_id", "event", "cust_days", "duration",
+                         "voice_minutes_avg", "sms_usage_avg"))
+categorical.features = intersect(all.features, c("plan","region"))
+
+cox.model = aa.coxph(data = customer.data.ta, 
+                     feature.columns = all.features,
+                     categorical.columns = categorical.features,
+                     time.interval.column = "cust_days",
+                     event.column = "event",
+                     accumulate = "cust_id")
+
+names(cox.model)
+ta.head(cox.model$coefficient.table)
+ta.head(cox.model$linear.predictor.table)
+
+coeffs = as.data.frame(cox.model$coefficient.table)
+```
+
+## Hazard Ratios
+
+### Hazad Ratio: Plan (Categorical)
+
+```{r Hazard Ratio Plan, cache=FALSE, echo=TRUE, fig.width=7, fig.height=6}
+data = coeffs[coeffs$predictor=='plan' &
+                (coeffs$p_value <= 0.05 | is.nan(coeffs$p_value)), ]
+data$category = factor(data$category, levels = data$category[order(data$exp_coef)], ordered = TRUE)
+createHazardRatioPlot(data, 
+                      title = expression(paste("Log Hazard Ratios ", exp(beta), " for Plans")),
+                      subtitle = "Plan 'Offer 20' as baseline at 1. Only plans with significant values included")
+createHazardRatioPlot(data, value = "coefficient", 
+                      title = "Hazard Ratio Coefficients for Plans",
+                      subtitle = "Plan 'Offer 20' as baseline at 0. Only plans with signficant values included")
+```
+
+### Hazard Ratio: Region (Categorical)
+
+```{r Hazard Ratio Region, cache=FALSE, echo=TRUE, fig.width=7, fig.height=6}
+data = coeffs[coeffs$predictor=='region' &
+                (coeffs$p_value <= 0.05 | is.nan(coeffs$p_value)), ]
+data$category = factor(data$category, levels = data$category[order(data$exp_coef)], ordered = TRUE)
+createHazardRatioPlot(data, 
+                      title = expression(paste("Log Hazard Ratio ", exp(beta), " for Regions")),
+                      subtitle = "Region R1 as baseline at 1. Only regions with significant values included")
+createHazardRatioPlot(data, value = 'coefficient', angle = 0,
+                      title = "Hazard Ratio Coefficients for Regions",
+                      subtitle = 'Region R1 as baseline at 0. Only plans with significant values included')
+
+```
+
+### Hazard Ratio: Usage (Numerical Features)
+```{r Hazard Ratio Numerical, cache=FALSE, echo=TRUE, fig.width=7, fig.height=6}
+data = coeffs[!coeffs$predictor %in% c('region','plan'), ]
+data$predictor = factor(data$predictor, levels = data$predictor[order(data$exp_coef)], ordered = TRUE)
+createHazardRatioPlot(data, 'predictor', 
+                      title = expression(paste("Log Hazard Ratio ", exp(beta), " of Numeric Predictors")),
+                      subtitle = "Voice, Data, and Text Usage Changes by One Unit", angle=0)
+createHazardRatioPlot(data, 'predictor', value = 'coefficient', 
+                      title = expression(paste("Hazard Ratio ", beta, " of Numeric Predictors")),
+                      subtitle = "Voice, Data, and Text Usage Changes by One Unit", angle=0)
+```
+
+## Comparing Customer Survivability
+```{r Customer Survival Curves, cache=FALSE, echo=TRUE, fig.width=7, fig.height=6}
+survival.probs = aa.cox.survfit(object = cox.model$coefficient.table,
+               cox.model.table = cox.model$linear.predictor.table,
+               predict.table = ta.subset(customer.data.ta, cust_id %in% c('1050527710','1064467365')),
+               predict.feature.columns = all.features,
+               predict.feature.names = all.features,
+               accumulate = 'cust_id')
+
+data = as.data.frame(survival.probs$survival.probability)
+data$cust_id = factor(data$cust_id)
+ggplot(data) +
+  geom_line(aes(time_interval, survival_prob, group=cust_id, color=cust_id), size=1) +
+  scale_color_solarized(name="Customer") +
+  labs(x="Days", y="Proportion Not Canceling", 
+       title = "Survival Curves by Customers", subtitle = NULL) +
+  theme_minimal(base_size = 14, base_family = 'mono') +
+  theme(legend.position = "bottom")
+
+```
+
+## Hazard Ratios by Customers
+
+### Reference Customer for Proportional Hazard
+Let's evaluate hazard ratios between all customers and reference mean "customer".
+This is scoring of customers using computed Cox PH model.
+
+First, create "average" customer to use as a reference (a baseline) to compute proportional hazards. 
+Such customer could be specificly designed based on research use case, e.g. analyzing certain
+demographics, customer experience, etc.
+
+```{r Typical Customer, cache=FALSE, echo=TRUE}
+customer_numeric_means = ta.colMeans(customer.data.ta[,setdiff(all.features, 
+                                                            categorical.features)])
+customer_all_means = cbind(as.data.frame(t(customer_numeric_means)),
+                           data.frame(plan="Plan 30", region="R2", 
+                                      stringsAsFactors = FALSE))
+ta.dropTable("customer_means", schemaName = "p17")
+ta.create(data=customer_all_means, table="customer_means", schemaName = "p17", 
+          tableType = "dimension")
+customer.means.ta = ta.data.frame("customer_means", schemaName = "p17")
+```
+
+### Scoring Customers
+
+```{r Scoring Customers, cache=FALSE, echo=TRUE}
+# compute ratios
+customer.ratios = aa.cox.predict(
+  object = cox.model, 
+  predicts = customer.data.ta,
+  refs = customer.means.ta,
+  predicts.partition.column = "1",
+  predict.feature.columns = all.features,
+  predict.feature.names = all.features,
+  ref.feature.columns = all.features,
+  refs.partition.column = c('1'),
+  accumulate = c("cust_id")
+  )
+
+predictions.coxph = customer.ratios[[1]]
+n = ta.dim(predictions.coxph)[[1]]
+```
+
+### Analyzing Proportional Hazard Customers
+
+```{r CustomerPercentiles, cache=FALSE, echo=TRUE}
+# Get just bottom and top N customers
+N = 100
+percentiles = aa.percentile(predictions.coxph, data.partition.column = "1",
+                            target.columns = 'hazardratio',
+                            percentile = c(N/n * 100, (1.0 - N/n)*100))
+percentiles.values = as.matrix(percentiles$result)
+bottom.value = percentiles.values[[1,2]]
+top.value = percentiles.values[[2,2]]
+
+bottom_and_top_customers = as.data.frame(
+  ta.transform(ta.subset(predictions.coxph, hazardratio <= bottom.value | hazardratio > top.value), 
+               group = if(hazardratio <= bottom.value) 'bottom' else 'top'),
+  stringsAsFactors = FALSE)
+bottom_and_top_customers$cust_id =
+  factor(bottom_and_top_customers$cust_id, 
+         levels = bottom_and_top_customers$cust_id[order(bottom_and_top_customers$hazardratio)], 
+         ordered = TRUE)
+
+bottom_and_top_customers$group = factor(bottom_and_top_customers$group, 
+                                        levels=c('top','bottom'), 
+                                        labels=c('High Risk','Low Risk'),
+                                        ordered = TRUE)
+```
+
+### Customers with Regions
+
+Besides each bar stands concrete customer sorted by their proportional hazard ratio.
+We always select bottom (low riks) and top (high risk) to display.
+```{r HazardRatiosWithRegions, echo=FALSE, fig.width=8, fig.height=6}
+ggplot(bottom_and_top_customers) +
+  geom_bar(aes(cust_id, hazardratio, fill=region), stat='identity') +
+  facet_wrap(~group, scales = "free", ncol=1) +
+  scale_fill_solarized(guide=guide_legend(title="Regions", nrow=1)) +
+  labs(x="Customer IDs", y="Hazard Ratio", 
+       title=paste("Bottom and Top",N,"Customers by Risk"), 
+       subtitle="by proportional hazard ratio to 'average' customer") +
+  theme_tufte(ticks=FALSE, base_size = 14, base_family = 'mono') + 
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())
+```
+
+### Customers with Plans
+
+```{r HazardRatiosWithPlans, echo=FALSE, fig.width=8, fig.height=6}
+ggplot(bottom_and_top_customers) +
+  geom_bar(aes(cust_id, hazardratio, fill=plan), stat='identity') +
+  facet_wrap(~group, scales = "free", ncol=1) +
+  scale_fill_solarized(guide=guide_legend(title="Plans", nrow=2)) +
+  labs(x="Customer IDs", y="Hazard Ratio", 
+       title=paste("Bottom and Top",N,"Customers by Risk"), 
+       subtitle="by proportional hazard ratio to 'average' customer") +
+  theme_tufte(ticks=FALSE, base_size = 14, base_family = 'mono') + 
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())
+```
+
+### Customers with Phone Usages
+
+```{r HazardRatiosWithData, echo=FALSE, fig.width=8, fig.height=6}
+ggplot(bottom_and_top_customers) +
+  geom_bar(aes(cust_id, hazardratio, fill=data_usage_avg), stat='identity') +
+  facet_wrap(~group, scales = "free", ncol=1) +
+  scale_fill_gradient(low = "#56B1F7", high = "#132B43", guide = guide_colorbar(title='Data Usage (GB)')) +
+  labs(x="Customer IDs", y="Hazard Ratio", 
+       title=paste("Bottom and Top",N,"Customers by Risk"), 
+       subtitle="by proportional hazard ratio to 'average' customer") +
+  theme_tufte(ticks=FALSE, base_size = 14, base_family = 'mono') + 
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())
+```
+
+```{r HazardRatiosWithSMS, echo=FALSE, fig.width=8, fig.height=6}
+ggplot(bottom_and_top_customers) +
+  geom_bar(aes(cust_id, hazardratio, fill=sms100_usage_avg), stat='identity') +
+  facet_wrap(~group, scales = "free", ncol=1) +
+  scale_fill_gradient(low = "#56B1F7", high = "#132B43", guide = guide_colorbar(title='SMS Usage (100s)')) +
+  labs(x="Customer IDs", y="Hazard Ratio", 
+       title=paste("Bottom and Top",N,"Customers by Risk"), 
+       subtitle="by proportional hazard ratio to 'average' customer") +
+  theme_tufte(ticks=FALSE, base_size = 14, base_family = 'mono') + 
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())
+```
+
+```{r HazardRatiosWithVoice, echo=FALSE, fig.width=8, fig.height=6}
+ggplot(bottom_and_top_customers) +
+  geom_bar(aes(cust_id, hazardratio, fill=voice_24hours_avg), stat='identity') +
+  facet_wrap(~group, scales = "free", ncol=1) +
+  scale_fill_gradient(low = "#56B1F7", high = "#132B43", guide = guide_colorbar(title='Voice Usage (24hrs)')) +
+  labs(x="Customer IDs", y="Hazard Ratio", 
+       title=paste("Bottom and Top",N,"Customers by Risk"), 
+       subtitle="by proportional hazard ratio to 'average' customer") +
+  theme_tufte(ticks=FALSE, base_size = 14, base_family = 'mono') + 
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())
+
+```

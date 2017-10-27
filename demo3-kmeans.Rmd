@@ -1,0 +1,199 @@
+---
+title: "K-Means Clustering Workflow with Aster and R - Churn Use Case"
+author: "Gregory Kanevsky"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: default
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r Setup and Functions, cache=FALSE, include=FALSE, echo=FALSE}
+library(TeradataAsterR)
+library(toaster)
+library(ggplot2)
+library(scales)
+library(ggthemes)
+
+conn = ta.connect("Aster", database = "demo3")
+
+masterView = 'p17.cust_metrics_summary_june2016'
+```
+
+# Determining Optimal Number of Clusters
+
+## Running K-means and Varying K (Number of Clusters)
+By varying k from 2 to K=20 and saving models we can track how k-means relevant metrics change.
+```{r DetermineNumberOfClusters, cache=TRUE, echo=TRUE}
+
+K = 20
+kmeansModels = list()
+for(k in 2:K) {
+  kmeansCustomers1 = computeKmeans(taConnection, "p17.cust_metrics_summary_june2016", centers=k, 
+                        include=c('voice_minutes_avg', 'sms_usage_avg', 'data_usage_avg'),
+                        scale = TRUE, id='cust_id', idAlias = "cust_id", 
+                        where="plan IN ('Plan 40','Plan 30','Plan 35','Plan 39','Plan 25','Plan 50')",
+                        scaledTableName=paste0('kmeans_customer_scaled_k_',k), 
+                        centroidTableName=paste0('kmeans_customer_centroids_k_',k), schema='p17',
+                        iterMax = 500)
+  kmeansModels[[k-1]] = kmeansCustomers1
+}
+
+totalRunningTimeMinutes = sum(sapply(kmeansModels, FUN = function(x){x$time['elapsed']}))/60
+```
+
+## Plot Total Withinness Trend
+```{r PlotWithinness, cache=FALSE, echo=TRUE, fig.width=7, fig.height=6}
+# Graph for Total Withinness
+data = data.frame(K=integer(0), totwithinss=numeric(0))
+for(n in 2:(length(kmeansModels)+1)) {
+  kmeansModel = kmeansModels[[n-1]]
+  data = rbind(data,
+               data.frame(K=n, totwithinss=kmeansModel$tot.withinss))
+}
+ggplot(data) +
+  geom_line(aes(K, totwithinss), size=1) + geom_point(aes(K, totwithinss), size=2) + 
+  labs(title="Within groups Sums of Squares vs. the Number of Clusters", 
+       x="Number of Clusters", y="Within groups Sums of Squares") +
+  scale_x_continuous(breaks=seq(0,K,2)) + 
+  scale_y_continuous(labels = comma) +
+  theme_minimal(base_size = 12, base_family = 'serif')
+```
+
+## Picking the Model
+We pick 6 cluster model based on the elbow position:
+```{r PickModel, cache=TRUE, echo=TRUE}
+
+k = 6
+kmeans.model = computeKmeans(taConnection, "p17.cust_metrics_summary_june2016", centers=k, 
+                        include=c('voice_minutes_avg', 'sms_usage_avg', 'data_usage_avg'),
+                        scale = TRUE, 
+                        aggregates = c("COUNT(*) cnt", "AVG(age) avg_age",
+                                       "SUM(CASE WHEN plan = 'Plan 40' THEN 1 ELSE 0 END) plan40_count",
+                                       "SUM(CASE WHEN plan = 'Plan 30' THEN 1 ELSE 0 END) plan30_count",
+                                       "SUM(CASE WHEN plan = 'Plan 35' THEN 1 ELSE 0 END) plan35_count",
+                                       "SUM(CASE WHEN plan = 'Plan 39' THEN 1 ELSE 0 END) plan39_count",
+                                       "SUM(CASE WHEN plan = 'Plan 25' THEN 1 ELSE 0 END) plan25_count",
+                                       "SUM(CASE WHEN plan = 'Plan 50' THEN 1 ELSE 0 END) plan50_count"),
+                        id='cust_id', idAlias = "cust_id", 
+                        where="plan IN ('Plan 40','Plan 30','Plan 35','Plan 39','Plan 25','Plan 50')",
+                        scaledTableName=paste0('kmeans_picked_customer_scaled_k_',k), 
+                        centroidTableName=paste0('kmeans_picked_customer_centroids_k_',k), schema='p17',
+                        iterMax = 500)
+```
+
+# Reviewing Model
+
+## Visualizing Centroids
+```{r VisualizingCentroids, echo=TRUE, cache=FALSE}
+createCentroidPlot(kmeans.model, format="line", groupByCluster=TRUE, coordFlip = FALSE,
+                   title = "Mobile Customer Clustering: Centroids")
+createCentroidPlot(kmeans.model, format="line", groupByCluster=FALSE, coordFlip = FALSE,
+                   title = "Mobile Customer Clustering: Centroids")
+```
+
+## Visualizing Cluster Properties
+```{r VisualizingClusters}
+createClusterPlot(kmeans.model)
+```
+
+## Visualizing Cluster Samples
+```{r ClusterSamples, cache=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+
+kmeans.model = computeClusterSample(taConnection, kmeans.model, 0.05)
+createClusterPairsPlot(kmeans.model)
+```
+
+# Eliminating Inactive Users from the Analysis
+
+## Feature Distributions
+
+### Average Monthly Voice Usage
+
+```{r TableInfoForHist, cache=FALSE, echo=FALSE}
+tableInfo = getTableSummary(taConnection, tableName = "p17.cust_metrics_summary_june2016", 
+                            include=c('voice_minutes_avg', 'sms_usage_avg', 'data_usage_avg'))
+```
+
+```{r FeatureDistsVoice, cache=TRUE, echo=TRUE, fig.width=9}
+
+voiceMinutesHist = computeHistogram(taConnection, tableName = "p17.cust_metrics_summary_june2016",
+                                    columnName = "voice_minutes_avg", tableInfo = tableInfo,
+                                    numbins = 80, startvalue = 0, endvalue = 80)
+createHistogram(voiceMinutesHist,
+                title="Monthly Average Voice Usage", xlab="Minutes", ylab="Count",
+                baseSize = 12, baseFamily = 'serif')
+
+```
+
+### Average Monthly SMS Usage
+
+```{r FeatureDistsSms, cache=TRUE, echo=TRUE, fig.width=9}
+
+smsHist = computeHistogram(taConnection, tableName = "p17.cust_metrics_summary_june2016",
+                                    columnName = "sms_usage_avg", tableInfo = tableInfo,
+                                    numbins = 80, startvalue = 0, endvalue = 80)
+createHistogram(smsHist,
+                title="Monthly Average SMS Usage", xlab="Tex Message Count", ylab="Count",
+                baseSize = 12, baseFamily = 'serif')
+
+```
+
+```{r FeatureDistsData, cache=TRUE, echo=TRUE, fig.width=9}
+
+dataHist = computeHistogram(taConnection, tableName = "p17.cust_metrics_summary_june2016",
+                                    columnName = "data_usage_avg", tableInfo = tableInfo,
+                                    numbins = 50, startvalue = 0, endvalue = 10)
+createHistogram(dataHist,
+                title="Monthly Average Data Usage", xlab="Minutes", ylab="Count",
+                baseSize = 12, baseFamily = 'serif')
+
+```
+
+## New Model Without Inactive Users
+
+### Clustering Active Customers Only
+
+We reduce number of clusters by 1 since it new data set will not contain inactive users that occupied most populated cluster before.
+Note augmented *where* clause argument that filters out customers with low usage for all 3 parameters.
+```{r ActiveOnlyCustomersKmeans, cache=TRUE, echo=TRUE}
+
+k = 5
+kmeansActiveModel = computeKmeans(taConnection, "p17.cust_metrics_summary_june2016", centers=k, 
+                        include=c('voice_minutes_avg', 'sms_usage_avg', 'data_usage_avg'),
+                        scale = TRUE, 
+                        aggregates = c("COUNT(*) cnt", "AVG(age) avg_age",
+                                       "SUM(CASE WHEN plan = 'Plan 40' THEN 1 ELSE 0 END) plan40_count",
+                                       "SUM(CASE WHEN plan = 'Plan 30' THEN 1 ELSE 0 END) plan30_count",
+                                       "SUM(CASE WHEN plan = 'Plan 35' THEN 1 ELSE 0 END) plan35_count",
+                                       "SUM(CASE WHEN plan = 'Plan 39' THEN 1 ELSE 0 END) plan39_count",
+                                       "SUM(CASE WHEN plan = 'Plan 25' THEN 1 ELSE 0 END) plan25_count",
+                                       "SUM(CASE WHEN plan = 'Plan 50' THEN 1 ELSE 0 END) plan50_count"),
+                        id='cust_id', idAlias = "cust_id", 
+                        where="plan IN ('Plan 40','Plan 30','Plan 35','Plan 39','Plan 25','Plan 50') 
+                              AND voice_minutes_avg >= 10 AND sms_usage_avg >= 10 AND data_usage_avg >= 2",
+                        scaledTableName=paste0('kmeans_customer_active_scaled_k_',k), 
+                        centroidTableName=paste0('kmeans_customer_active_centroids_k_',k), schema='p17',
+                        iterMax = 500)
+
+```
+
+### Visualizing Centroids
+```{r VisualizingCentroidsActiveCust, echo=TRUE, cache=FALSE}
+createCentroidPlot(kmeansActiveModel, format="line", groupByCluster=TRUE, coordFlip = FALSE,
+                   title = "Mobile Customer Clustering: Centroids")
+createCentroidPlot(kmeansActiveModel, format="line", groupByCluster=FALSE, coordFlip = FALSE,
+                   title = "Mobile Customer Clustering: Centroids")
+```
+
+### Visualizing Cluster Properties
+```{r VisualizingClustersActiveCust}
+createClusterPlot(kmeansActiveModel)
+```
+
+### Visualizing Cluster Samples
+```{r ClusterSamplesActiveCust, cache=TRUE, echo=TRUE, warning=FALSE, message=FALSE}
+
+kmeansActiveModel = computeClusterSample(taConnection, kmeansActiveModel, 0.05)
+createClusterPairsPlot(kmeansActiveModel)
+```
