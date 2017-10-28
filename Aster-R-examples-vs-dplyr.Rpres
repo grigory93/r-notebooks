@@ -1,0 +1,597 @@
+Data Science Pipelines with R and Teradata Aster
+========================================================
+author: Gregory Kanevsky 
+date: `r format(Sys.time(), "%B %d, %Y")`
+width: 1440
+height: 900
+font-family: 'Times New Roman'
+```{r set-options, echo=FALSE, cache=FALSE}
+options(width = 1200)
+opts_chunk$set(cache=FALSE)
+
+dsn = "PreSalesCluster1-dallas"
+database = "baseball"
+```
+
+What is Data Science Pipeline? 
+========================================================
+(not this)
+
+![Not Data Science Pipeline.](../images/pipeline_not.jpg)
+
+Source: [Red Hat Developer Program](https://developers.redhat.com/blog/2016/09/14/microservices-cicd-pipelines-in-openshift/)
+
+What is Data Science Pipeline? 
+========================================================
+(could be this)
+
+![Data Science Pipeline Workflow.](../images/Understanding the data science pipeline_2 - TESLA INSTITUTE.png)
+
+Source: [Tesla Institute](http://www.tesla-institute.com/index.php/using-joomla/extensions/languages/278-understanding-the-data-science-pipeline)
+
+How Did Data Science Pipelines Come About?
+========================================================
+ * 4 V's (attributes of Big Data):
+   + **Volume**: Scale of Data
+   + **Velocity**: Speed of Data
+   + **Variety**: Diversity of Data
+   + **Veracity**: (Un)certainty of Data
+ * The fifth V: Extracting Business **Value** from Big Data
+ * **Value** shifts focus from storing, processing, managing, etc.
+ 
+ How to Deliver Business Value with Big Data
+========================================================
+ * By shifting focus from storing, processing and managing big data
+ *   to agile enterprise applications encompassing big data
+ * By addressing business use cases...
+ * By leveraging scalable platform and advanced analytics...
+ * By building
+  + reproducable, 
+  + consistent, 
+  + productionizable applications...
+ * ...as Data Science Pipelines.
+ 
+ Components of Data Science Pipeline 
+========================================================
+ * Connectivity and streaming (e.g. Teradata QueryGrid, connectors)
+ * High volume data processing and storage (e.g. Teradata Aster on various platforms: appliance, Hadoop, cloud, software only)
+ * Co-located analytical engines: statistics, machine learning, text, graphs, etc. (e.g. Aster SQL-MR, SQL-GR, in-db R)
+ * Visual and reporting for consumption of results (e.g. R packages, App Center)
+ * Programming environment that supports logging, alerting, monitoring, testing, distributed execution, deployment, libraries and access to the components above (e.g. R, Python, Java)
+
+How To Build It?
+========================================================
+*with Cross of Different Skills*:
+ - Data Science
+ - Programming / Software Development
+ - Enterprise / Database Design and Architecture
+ - Business  / Domain Knowledge
+
+***
+
+*and with R and Aster*:
+ - R programming environment (desktop or server)
+ - Teradata Aster Big Data Database
+ - Aster R Integration with **TeradataAsterR**
+ - Other R packages (**toaster**, **ggplot2**, **igraph**, etc.)
+ 
+
+Teradata Aster Architecture
+========================================================
+![Teradata Aster Architecture.](../images/aster-for-r-architecture.png)
+
+ 
+Teradata Aster R Primer Environment
+========================================================
+ - R programming environment and **TeradataAsterR**: glue that holds everything together
+ - Aster (any platform): distributed data, scale, performance, and ultimate analytics with R runtime enabled
+ - Toy dataset: Lahman Baseball Database (**Lahman** package)
+ - Countering with **dplyr** examples in R for comparison
+```{r echo=TRUE, eval=TRUE}
+library(Lahman)
+library(dplyr)
+library(TeradataAsterR)
+library(ggplot2)
+library(ggthemes)
+
+ta.connect(dsn=dsn, database=database)
+```
+
+Use Case I: Analyzing Batters and Batting Stats
+========================================================
+ - Transforms and filters
+ - Summarization
+ - Calculating complex metrics
+ - Exploratory analysis
+ - Calculating Sabermetric stats
+ - Dimensionality reduction
+
+How Aster R Represents Data
+========================================================
+ - Using virtual objects
+ - The look and feel is similar to R objects
+ - Virtual data frame represents data in Aster (table, view, query) and is similar to R data frame
+ - There other virtual objects similar to R factor and vector
+```{r, include=TRUE, eval=FALSE, cache=FALSE, echo=TRUE}
+batting.ta = ta.data.frame("batting", schemaName = "public")
+
+ta.dim(batting.ta)
+ta.nrow(batting.ta)
+ta.head(batting.ta)
+ta.summary(batting.ta)
+ta.colnames(batting.ta) <- c(newnames)
+```
+
+Loading Data into Aster
+========================================================
+ - Aster Virtual Data Frame
+ - Using utility **ncluster_loader**: scalable and enterprise friendly version suitable for high-performance batch loads
+ - Using Aster R virtual data frame:
+  + *ta.push* into existing virtual data frame
+  + *ta.load.csv* loads data from a file in .csv format 
+  + *ta.create* creates tables in Aster using R or virtual data frame
+  + *ta.reify* materializes virtual data frame into temporary schema
+  
+Loading Baseball Data into Aster
+========================================================
+```{r, echo=TRUE, eval=TRUE, cache=TRUE}
+createBaseballData <- function(data, table, schema, 
+                               partitionKey, analyzeFlag) {
+  t = proc.time()
+  ta.dropTable(tableName = table, schemaName = schema)
+  ta.create(data, table = table, schemaName = schema, 
+            tableType = "fact",
+            partitionKey = partitionKey, 
+            row.names = TRUE, analyze = analyzeFlag)
+  runtime = proc.time() - t
+  
+}
+
+# Master table
+createBaseballData(Master, "master", "public", "playerID", TRUE)
+
+# Batting table
+createBaseballData(Batting, "batting", "public", "playerID", TRUE)
+```
+
+Getting Started with Lahman DatabaseS
+========================================================
+
+```{r, include=TRUE, eval=TRUE, cache=FALSE}
+# R and Lahman package
+dim(Batting); dim(Master)
+
+# Aster R
+batting.ta = ta.data.frame("batting")
+master.ta = ta.data.frame("master")
+
+ta.dim(batting.ta); ta.dim(master.ta)
+```
+
+Pipeline and TDD: Always Test Every Step
+=========================================================
+ - Example: validating data load
+```{r, cache=TRUE}
+compareDataInRandAster <- function(df, ta, key, columns=names(df)) {
+  
+  columns = setdiff(unique(c(key, columns)), 
+                    c("lgID","teamID","bats","throws"))
+  data_in_R = df[, columns] %>% arrange_(.dots=setNames(key,key))
+  data_from_Aster = as.data.frame(ta[ , columns], 
+    stringsAsFactors = FALSE) %>% arrange_(.dots=setNames(key,key))
+  
+  all.equal(data_in_R, data_from_Aster)
+}
+
+compareDataInRandAster(Master, master.ta, key = c("playerID"))
+compareDataInRandAster(Batting, batting.ta, key = c("playerID", 
+                                  "yearID", "stint"))
+```
+
+Types of Joins Supported by Aster R
+========================================================
+ - Inner join
+ - Left and right outer joins
+ - Full outer join
+ - Semi-join
+ - Anti-join (opposite of semi-join)
+ - Cross join (Cartesian product)
+ - Data is always processed in Aster and never passes through network unless explicitly asked for
+ 
+ Join in R and Aster
+========================================================
+```{r, cache=TRUE}
+# R
+big.df = merge(Batting, Master, by="playerID")
+
+# dplyr
+big.tbl = Batting %>%
+  inner_join(Master, by="playerID")
+
+# Aster R
+big.ta = ta.join(batting.ta, master.ta, by="playerID")
+ta.colnames(big.ta)[c('x.row_names','x.playerID')] = c('row_names','playerID')
+
+compareDataInRandAster(big.df, big.tbl, 
+  key = c("playerID", "yearID", "stint"))
+
+compareDataInRandAster(big.tbl, big.ta, 
+  key = c("playerID", "yearID", "stint"))
+```
+
+Data Manipulation: Subset and Transform
+========================================================
+```{r, cache=TRUE}
+batting_metrics = c("G", "AB", "R", "H", "HR", "BB", "SO")
+
+# dplyr
+big.prepped.df = big.df %>% 
+  mutate(key = paste(playerID, yearID, stint, sep="-"),
+         age = yearID - birthYear) %>% 
+  select_(quote(c(key, playerID, yearID, stint, age)), 
+          .dots=batting_metrics) %>%
+  filter(!is.na(HR) & yearID >= 1995)
+
+# Aster R
+big.prepped.ta = ta.transform(big.ta, 
+    key = paste(playerID, yearID, stint, sep="-"),
+    age = yearID - birthYear)
+big.prepped.ta = ta.subset(big.prepped.ta[,c("key","playerID","yearID","stint","age",
+    batting_metrics, "row_names")],
+    !is.na(HR) & yearID >= 1995)
+
+compareDataInRandAster(big.prepped.df, big.prepped.ta, key = "key")
+```
+
+Summarization
+========================================================
+
+Summarization with Aster R may utilize SQL, SQL-MR or R execution engines  
+always running in-database:
+
+  - SQL **GROUP BY** compatible operations, e.g. **MAX**, **MIN**, **AVG**, etc.: *ta.summarise* or *ta.summarise.each*
+  - SQL window functions using *ta.transform* 
+  - in-database R with **ta.tapply** or **ta.by** for most flexible option
+
+
+SQL GROUP BY with ta.summarise
+========================================================
+
+Aggregate stats for each year over players' stints:
+```{r, cache=TRUE}
+# dplyr
+summary1.df = big.prepped.df %>% group_by(playerID, yearID, age) %>%
+  summarise_each_(funs(sum), batting_metrics) 
+
+# Aster R
+summary1.ta = ta.summarise(big.prepped.ta, group.by = c("playerID", "yearID", "age"),
+  G=sum(G), AB=sum(AB), R=sum(R), H=sum(H), HR=sum(HR), BB=sum(BB), SO=sum(SO))
+
+#summary1.ta = ta.summarise.each(tempforsummarise.ta, group.by = c("playerID"),
+#                                funs = c("sum"), columns = batting_metrics)
+  
+compareDataInRandAster(summary1.df, summary1.ta, key = c("playerID","yearID"))
+```
+
+Window Functions with ta.transform
+========================================================
+```{r, cache=TRUE}
+# dplyr
+window.df = summary1.df %>% group_by(playerID) %>%
+  mutate(seasonsTotal=n(),
+    currentSeason=with_order(order_by = yearID, fun = row_number, x = yearID),
+    currentTopHR=with_order(order_by = yearID, fun = cummax, x = HR),
+    topHR=max(HR), startCareerYear = min(yearID), endCareerYear = max(yearID))
+
+# Aster R
+window.ta = ta.transform(summary1.ta, 
+  seasonsTotal=n(partition = playerID),
+  currentSeason=row_number(order = yearID, partition = playerID),
+  currentTopHR=cummax(HR, order = yearID, partition = playerID),
+  topHR=max(HR, partition = playerID),
+  startCareerYear = min(yearID, partition=playerID), 
+  endCareerYear = max(yearID, partition=playerID))
+
+compareDataInRandAster(window.df, window.ta,
+  key = c("playerID", "yearID"))
+```
+
+
+In-Database R aggregates with ta.tapply
+========================================================
+What is HR career age?
+```{r, cache=TRUE}
+# dplyr
+summary2.df = window.df %>%
+  group_by(playerID) %>%
+  summarize(
+    seasons_total = seasonsTotal[[1]],
+    max_hr = max(HR),
+    top_hr_age = age[HR == max(HR)][[1]])
+
+# Aster R
+summary2.ta = ta.tapply(window.ta, INDEX=window.ta$playerID, 
+  FUN=function(x){c(x$seasonsTotal[[1]], max(x$HR), 
+                    x$age[x$HR == max(x$HR)][[1]])},
+  out.tadf = list(columns=c("playerID", "seasons_total",
+                            "max_hr", "top_hr_age")))
+
+compareDataInRandAster(summary2.df, summary2.ta, key = "playerID")
+```
+
+HR Career Age Distributions
+=======================================================
+```{r, cache=FALSE, include=TRUE, echo=FALSE, out.width=400, out.height=400}
+ggplot(as.data.frame(ta.hist(summary2.ta, "top_hr_age", bin.size = 1, start.value = 18)[[1]])) +
+  geom_bar(aes(start_bin, frequency), stat='identity', color='black', fill='white') +
+  labs(title='All Players', x='Age', y='Count') +
+  theme_tufte(ticks = FALSE, base_size = 16)
+
+ggplot(as.data.frame(ta.hist(ta.subset(summary2.ta, seasons_total >= 5), "top_hr_age", bin.size = 1, start.value = 18)[[1]])) +
+  geom_bar(aes(start_bin, frequency), stat='identity', color='black', fill='white') +
+  labs(title='Players with Total Seasons >= 5', x='Age', y='Count') +
+  theme_tufte(ticks = FALSE, base_size = 16)
+
+ggplot(as.data.frame(ta.hist(ta.subset(summary2.ta, seasons_total >= 5 & max_hr >= 10), "top_hr_age", bin.size = 1, start.value = 18)[[1]])) +
+  geom_bar(aes(start_bin, frequency), stat='identity', color='black', fill='white') +
+  labs(title='Players with Total Seasons >= 5\nand max. HR >= 10', x='Age', y='Count') +
+  theme_tufte(ticks = FALSE, base_size = 16)
+```
+
+```{r, cache=FALSE, include=TRUE, echo=TRUE, eval=FALSE}
+ggplot(as.data.frame(
+  aa.hist(data=ta.subset(summary2.ta, seasons_total >= 5 & max_hr >= 10),
+          value.column="top_hr_age", bin.size=1, 
+          start.value=18, end.value=45)[[1]])) +
+  geom_bar(aes(start_bin, frequency), stat='identity') +
+  labs(title='Players with Total Seasons >= 5 and max. HR >= 10',
+       x='Age', y='Count')
+```
+
+Dimensionality Reduction with PCA
+=======================================================================
+ - Including data science process and models is natural
+ - Become integral part of the workflow
+ - Same principles of reproducability, consistency, operationability apply
+ - Examples with PCA and Logistic Regression
+
+Sabermetric Batting Statistics
+=======================================================================
+```{r, cache=FALSE}
+batting.new=ta.transform(batting.ta,
+                         key=paste(playerID,yearID, sep='-'))
+batting.new=ta.summarise(batting.new, group.by = c("key"),
+  playerID=min(playerID), yearID=min(yearID), G=sum(G), AB=sum(AB), 
+  R=sum(R), H=sum(H), X2B=sum(X2B), X3B=sum(X3B), HR=sum(HR), 
+  RBI=sum(RBI), SB=sum(SB), CS=sum(CS), BB=sum(BB), SO=sum(SO), 
+  IBB=sum(IBB), HBP=sum(HBP), SH=sum(SH), SF=sum(SF), GIDP=sum(GIDP))
+batting.new=ta.transform(ta.subset(batting.new, AB>30 & yearID > 1995), 
+  TB = H + X2B + 2*(X3B) + 3*(HR), BA = H / AB,
+  OBP = (H + BB + HBP) / (AB + BB + HBP + SF),
+  SLG = (H + X2B + 2*(X3B) + 3*(HR)) / AB)
+batting.new=ta.transform(batting.new,
+  OPS = OBP + SLG, TA = (TB + BB + HBP + SB − CS)/(AB − H + CS + GIDP),
+  ISO = SLG − BA, SECA = (TB − H + BB + SB − CS) / AB,
+  RC=(H+BB+HBP−CS−GIDP)*(TB+0.26*(BB−IBB+HBP)+0.52*(SH+SF+SB)) /
+    (AB + BB + HBP + SH + SF))
+batting.new=ta.transform(batting.new, 
+  RC27=RC/((AB−H+SH+SF+CS+GIDP)/27))
+```
+
+Materializing Virtual Data Frame in Aster
+========================================================================
+```{r, cache=TRUE}
+ta.tableType(batting.new)
+ta.dropTable("batting_for_pca", schemaName = "public")
+ta.create(ta.subset(batting.new, H >= 1), "batting_for_pca", 
+          schemaName = "public", tableType = "fact", 
+          partitionKey = "playerID", row.names = TRUE)
+batting.pca = ta.data.frame("batting_for_pca")
+ta.tableType(batting.pca)
+ta.dim(batting.pca)
+```
+
+Running PCA (prcomp and Aster SQL-MR)
+=========================================================================
+```{r, cache=TRUE}
+data_in_aster_for_pca = batting.pca[,c("TB","OBP","SLG","OPS","ISO","RC","RC27")]
+
+# PCA In-Database R 
+pca.result = ta.apply(data_in_aster_for_pca, MARGIN = c(), 
+  FUN = function(x){prcomp(x, retx=TRUE, center=TRUE, scale.=TRUE)})
+class(pca.result) = "prcomp"
+
+# PCA in R
+pca.result.R = prcomp(as.data.frame(data_in_aster_for_pca), 
+  retx=TRUE, center=TRUE, scale.=TRUE)
+
+# PCA in Aster (SQL-MR)
+ttt = aa.scale.map(data=data_in_aster_for_pca,
+  input.columns=c("TB","OBP","SLG","OPS","ISO","RC","RC27")) 
+scale.result.tr = aa.scale(data=data_in_aster_for_pca, 
+                           object=ttt, method="std")[[1]]
+pca.result.Aster = as.data.frame(aa.pca(scale.result.tr)[[1]])
+```
+
+Comparing PCA Results
+=========================================================================
+```{r, cache=FALSE, include=TRUE, echo=FALSE, out.width=400, out.height=400}
+pca.importance = data.frame(component=names(summary(pca.result)$importance[2,]),
+                            importance=summary(pca.result)$importance[2,],
+                            stringsAsFactors = FALSE)
+
+ggplot(pca.importance) +
+  geom_bar(aes(component, importance), stat='identity', color='black', fill='grey') +
+  labs(title='PCA Importance (In-Database R)', x='Principal Components', y=NULL) +
+  theme_tufte(ticks=FALSE, base_size = 16)
+
+pca.importance = data.frame(component=names(summary(pca.result.R)$importance[2,]),
+                            importance=summary(pca.result.R)$importance[2,],
+                            stringsAsFactors = FALSE)
+ggplot(pca.importance) +
+  geom_bar(aes(component, importance), stat='identity', color='black', fill='grey') +
+  labs(title='PCA Importance (R)', x='Principal Components', y=NULL) +
+  theme_tufte(ticks=FALSE, base_size = 16)
+
+pca.importance = data.frame(pca.result.Aster[,c("component_rank","var_proportion")])
+pca.importance$component = factor(pca.importance$component_rank, labels = paste0("PC",pca.importance$component_rank), ordered = TRUE)
+ggplot(pca.importance) +
+  geom_bar(aes(component, var_proportion), stat='identity', color='black', fill='grey') +
+  labs(title='PCA Importance (Aster)', x='Principal Components', y=NULL) +
+  theme_tufte(ticks=FALSE, base_size = 16)
+```
+
+Use Case II: Predicting Player Position 
+=======================================================================
+Example of complete workflow including:
+- Data load/sourcing
+- Data transformations/filters/summarization
+- Join
+- Random sampling and partitioning
+- Predictive model (Log. Regression)
+- Model evalution (ROC)
+
+Fielding: Data Load and Transformations
+=======================================================================
+```{r, cache=TRUE}
+createBaseballData(Fielding, "fielding", "public", "playerID", TRUE)
+
+fielding = ta.data.frame("fielding")
+
+fielding.tadf = ta.subset(fielding, yearID >= 1990 &
+  lgID == 'NL' & G >= 20)[, c("playerID","yearID","POS")]
+
+fielding.tadf = ta.unique(fielding.tadf)
+
+fielding.tadf = ta.transform(fielding.tadf, 
+  ispitcher = if(POS=="P") 1 else 0)
+```
+
+Batting: New Stats and Data Transformations
+========================================================================
+```{r, cache=TRUE}
+batting = ta.data.frame("batting")
+
+batting.summary.tadf = ta.summarise(batting, group.by = c("playerID", "yearID", "lgID"),
+  G=sum(G), AB=sum(AB), R=sum(R), H=sum(H), X2B=sum(X2B), X3B=sum(X3B), HR=sum(HR), BB=sum(BB), 
+  SO=sum(SO), HBP=sum(HBP), SB=sum(SB), CS=sum(CS), GIDP=sum(GIDP), SF=sum(SF))
+batting.tadf = ta.subset(batting.summary.tadf, yearID >= 1990 & lgID == 'NL' & G >= 20 & AB > H)
+
+batting.enh.tadf = ta.transform(batting.tadf, 
+  BA=H/AB, SLG=(H+X2B+2*X3B+3*HR)/AB,
+  TA=(H+X2B+2*X3B+3*HR+BB+HBP+SB-CS)/(AB-H+CS+GIDP),
+  OBP=(H+BB+HBP)/(AB+BB+HBP+SF),
+  OPS=(AB*(H+BB+HBP)+(H+X2B+2*X3B+3*HR)*(AB+BB+SF+HBP))/
+    (AB*(AB+BB+SF+HBP)))
+```
+
+
+Consolidating Data Sets
+=========================================================================
+```{r, cache=TRUE, messages=FALSE, warning=FALSE, message=FALSE}
+all.tadf = ta.join(fielding.tadf, batting.enh.tadf, by=c("playerID","yearID"))
+all.tadf = ta.transform(all.tadf, id = paste(x.playerID, x.yearID, sep="-"), playerID=x.playerID)
+
+ta.dropTable("my_simplemodel_data", schemaName = "public")
+ta.create(all.tadf, "my_simplemodel_data", schemaName = "public", tableType = "fact", partitionKey = "playerID",
+          row.names = TRUE)
+all.tadf = ta.data.frame("my_simplemodel_data", schemaName = "public")
+ta.dim(all.tadf)
+```
+
+Splitting Data into Training and Testing Datasets for Machine Learning
+==========================================================================
+This is most simplistic approach to partition data:
+```{r, cache=FALSE}
+data_size = ta.dim(all.tadf)[[1]]
+mlsets = aa.random.sample(all.tadf, num.sample = c(data_size*.8,
+                                                   data_size*.2))[[1]]
+
+ta.table(mlsets$set_id, mlsets$ispitcher)
+
+train.tadf = ta.subset(mlsets, set_id == 0)
+test.tadf = ta.subset(mlsets, set_id == 1)
+```
+
+GLM Model (Linear Regression) 
+===========================================================================
+```{r, cache=FALSE, echo=FALSE, include=FALSE}
+# remove view, otherwise aa.glm() generates this error:
+# 42000 34 [AsterData][nCluster] (34) ERROR: relation "public"."datatemptablename" already exists. 
+sqlDrop(taConnection, "datatemptablename", errors=FALSE)
+```
+
+```{r, cache=FALSE}
+pitcher.glm.model  = aa.glm(
+  formula=(ispitcher ~ BA + SLG + TA),
+  family='binomial',
+  data=train.tadf,
+  maxit = 50)
+pitcher.glm.model$coefficients
+```
+
+Testing GLM Model
+===========================================================================
+```{r, cache=FALSE}
+glm.result = aa.glm.predict(object=pitcher.glm.model, 
+                            newdata = test.tadf,
+                            terms = c("id", "ispitcher"))
+ta.head(glm.result[[1]])
+```
+
+Model Evaluation with ROC
+============================================================================
+```{r, eval=FALSE, include=TRUE}
+glm.result.df = as.data.frame(glm.result$result)
+roc = data.frame(fpos = numeric(0), tpos = numeric(0))
+for(threshold in seq(0., 1., 0.01)) {
+  cm = t(table(c(glm.result.df$fitted_value > threshold, 
+                 TRUE, FALSE),
+               c(glm.result.df$ispitcher, 1, 0)))
+  roc = rbind(roc, c(fpos=cm[1,2]/sum(cm[1,]), 
+                     tpos=cm[2,2]/sum(cm[2,])))
+}
+
+names(roc) = c('fpos','tpos')
+```
+
+ROC and AUC
+============================================================================
+```{r, cache=FALSE, include=TRUE, echo=FALSE, out.width=800, out.height=800}
+
+# in-database implementation of confusiton matrix
+# also consider aa.confMatrix
+#ttt = glm.result[[1]]
+#ttt = ta.transform(ttt, prediction = fitted_value > threshold)
+#cm.ta = t(as.matrix(ta.table(ttt$prediction, ttt$ispitcher)))
+
+glm.result.memory = as.data.frame(glm.result[[1]])
+ta.rm(glm.result[[1]])
+roc = data.frame(fpos = numeric(0), tpos = numeric(0))
+for(threshold in seq(0., 1., 0.01)) {
+  glm.result.memory$prediction = glm.result.memory$fitted_value > threshold
+  cm = t(table(c(glm.result.memory$prediction, TRUE, FALSE),
+               c(glm.result.memory$ispitcher, 1, 0)))
+  roc = rbind(roc, c(fpos=cm[1,2]/sum(cm[1,]), tpos=cm[2,2]/sum(cm[2,])))
+}
+
+names(roc) = c('fpos','tpos')
+roc.ordered = roc[order(roc$fpos),]
+roc.ordered$base = c(0,diff(roc.ordered$fpos))
+AUC = with(roc.ordered, sum(base * tpos))
+
+ggplot2::ggplot(roc) +
+  ggplot2::geom_line(ggplot2::aes(fpos, tpos)) +
+  ggplot2::geom_abline(intercept = 0, slope = 1, linetype="dashed") +
+  ggplot2::labs(subtitle=paste("ROC Curve AUC=", round(AUC, 5)), title="Position by Batting Stats", 
+                x="False Positive Rate", y="True Positive Rate") +
+  ggthemes::theme_tufte(ticks = FALSE, base_size = 20) +
+  ggplot2::xlim(0,1) + ggplot2::ylim(0,1)
+```
+
+References
+=======================================================================
+ * [Building Data Science Pipelines: Practices and Principles](https://www.oreilly.com/ideas/three-best-practices-for-building-successful-data-pipelines)
+ * [How to Build a Big Data Analytics Pipeline](https://dzone.com/articles/how-to-build-an-analytic-pipeline)
+ * [Data Mining Career Batting Performances in Baseball (pdf)](https://teraworks.teradata.com/download/attachments/311348952/1205.0104v1.pdf?version=1&modificationDate=1494436689000&api=v2)
+ * RPbus Presentations: [1](http://rpubs.com/grigory/AsterRPipeline) and [2](http://rpubs.com/grigory/AsterRPipeline2)
