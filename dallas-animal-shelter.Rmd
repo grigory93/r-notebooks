@@ -6,6 +6,8 @@ output:
   html_document: default
   html_notebook: default
   pdf_document: default
+editor_options: 
+  chunk_output_type: console
 ---
 ![](../graphics/dallas-animal-shelters-multiple-dog-monthly-trends-sankey.png)
 ```{r Setup and Functions, cache=FALSE, include=FALSE, echo=FALSE}
@@ -24,9 +26,11 @@ library(networkD3)
 library(igraph)
 library(htmlwidgets)
 
-createIntakeToOutcomeSankey <- function(data, forAnimal,
+createIntakeToOutcomeSankey <- function(data, forAnimal, metric="n",
                                         ins = c("CONFISCATED","OWNER SURRENDER","STRAY"),
                                         outs = c("ADOPTION","EUTHANIZED","RETURNED TO OWNER","TRANSFER")) {
+  select_metric = enquo(metric)
+  
   net.df = data %>%
     filter(animal == forAnimal) %>%
     mutate(type = as.character(type),
@@ -34,8 +38,9 @@ createIntakeToOutcomeSankey <- function(data, forAnimal,
          type = ifelse(type %in% ins, type, "OTHER INTAKES"),
          outcome = ifelse(outcome %in% outs, outcome, "OTHER OUTCOMES")) %>%
     group_by(type, outcome) %>%
-    summarise(value=n()) %>%
-    ungroup()
+    summarise(n=n(), 
+              hours=as.integer(mean(hours))) %>%
+    select(type, outcome, !!select_metric)
   
   net = igraph_to_networkD3(graph_from_data_frame(net.df, directed=TRUE))
   widget = sankeyNetwork(Links = net$links, Nodes = net$nodes, Source = "source",
@@ -57,7 +62,7 @@ computeAndCreateCorrelations <- function(model.data.dogscats, forAnimal, exclude
     ) %>%
     complete(animal, type, monthly_in, fill=list(n=0)) %>%
     mutate(type = paste0("IN:",type)) %>%
-    filter(type %in% ins) %>%
+    filter(animal == forAnimal & type %in% ins) %>%
     rename(monthly = monthly_in, 
            in_out_type = type),
   model.data.dogscats %>%
@@ -68,11 +73,12 @@ computeAndCreateCorrelations <- function(model.data.dogscats, forAnimal, exclude
     ) %>%
     complete(animal, outcome, monthly_out, fill=list(n=0)) %>%
     mutate(outcome = paste0("OUT:",outcome)) %>%
-    filter(outcome %in% outs) %>%
+    filter(animal == forAnimal & outcome %in% outs) %>%
     rename(monthly = monthly_out,
            in_out_type = outcome)
   ) %>%
-    mutate(in_out_typeshort = str_replace(in_out_type, "(IN:|OUT:)", ""))
+    mutate(in_out_typeshort = str_replace(in_out_type, "(IN:|OUT:)", "")) %>%
+    filter(monthly < excludeDate)
     
 
   plots = list(length(ins)*length(outs))
@@ -82,9 +88,7 @@ computeAndCreateCorrelations <- function(model.data.dogscats, forAnimal, exclude
   for(intype in ins)
     for(outtype in outs) {
       i = i + 1
-      p = ggplot(data[data$animal == forAnimal & 
-                      data$monthly != excludeDate &
-                      (data$in_out_type == intype | data$in_out_type == outtype), ]) +
+      p = ggplot(data[(data$in_out_type == intype | data$in_out_type == outtype), ]) +
         geom_line(aes(monthly, n, group=in_out_type, color=in_out_type), size=1.2) +
         labs(x=NULL, y=switch(i%%4+1,NULL,'Totals',NULL), title=NULL) +
         scale_color_solarized(name=NULL, labels=str_replace(c(intype, outtype), "(IN:|OUT:)", "")) +
@@ -94,12 +98,8 @@ computeAndCreateCorrelations <- function(model.data.dogscats, forAnimal, exclude
             legend.text = element_text(size=10))
       plots[[i]] = p
     
-      cordata = cbind(left=data[data$animal == forAnimal & 
-                      data$monthly != excludeDate &
-                      data$in_out_type == intype, 'n'],
-                    right=data[data$animal == forAnimal & 
-                      data$monthly != excludeDate &
-                      data$in_out_type == outtype, 'n'])
+      cordata = cbind(left=data[data$in_out_type == intype, 'n'],
+                      right=data[data$in_out_type == outtype, 'n'])
       cormat = rbind(cormat,
                    data.frame(x=intype, y=outtype, value=cor(cordata)[[1,2]],
                               stringsAsFactors = FALSE))
@@ -133,8 +133,8 @@ createSurvivalCurve <- function(surv.data, feature, len, threshold = 100,
                                 title="Cats and Dogs",
                                 subtitle="Survival Probabilities in Dallas Animal Shelters, FY 2015-2017",
                                 caption=NULL, legend.position = "none", legend.title=feature,
-                                scale_color = scale_color_solarized(name=legend.title),
-                                theme = theme_minimal(base_family = 'serif')) {
+                                scale_color = scale_color_ptol(name=legend.title),
+                                theme = theme_minimal(base_size=16, base_family = 'serif')) {
   feature.fac = as.factor(c(rep(str_sub(names(surv.data$strata), len), surv.data$strata)))
   df = data.frame(surv = surv.data$surv, time = as.integer(surv.data$time/24), strata = feature.fac)
 
@@ -154,8 +154,9 @@ createSurvivalCurve <- function(surv.data, feature, len, threshold = 100,
 createSurvivalHistogram <- function(data, feature, threshold = 100, title=NULL,
                                     subtitle="Accepted Animal Totals by Outcome",
                                     caption=NULL, legend.title = "Animal", legend.position = "right",
-                                    scale_fill = scale_fill_solarized(name=legend.title),
-                                    theme = theme_minimal(base_family = 'serif')) {
+                                    scale_fill = scale_fill_ptol(name=legend.title),
+                                    theme = theme_minimal(base_size=16, base_family = 'serif'),
+                                    caption_hjust = 0) {
   
   event_names = c(`1`="Not Survived", `0`="Survived")
   
@@ -169,11 +170,39 @@ createSurvivalHistogram <- function(data, feature, threshold = 100, title=NULL,
     theme +
     theme(legend.position = legend.position,
           axis.text.y = element_blank(),
-          plot.caption = element_text(size = 10, hjust = 0))
+          plot.caption = element_text(size = 8, hjust = caption_hjust))
 }
 
-caption = paste("Source: https://goo.gl/xCVUFT ©",year(today()),"Gregory Kanevsky Infographics.")
+createSurvivalChancesHist <- function(data, group_var,
+                                      scale_fill =  scale_fill_manual(values = solarized_pal()(2)[c(2,1)], name="Survived"),
+                                      theme = theme_minimal(base_size=16, base_family = 'serif')) {
+  
+  group_var = enquo(group_var)
+  
+  
+  ttt = data %>% 
+    group_by(!!group_var, event) %>%
+    summarise(cnt = n()) %>%
+    mutate(freq = cnt/sum(cnt)) %>% 
+    ungroup() %>%
+    mutate(event = !as.logical(event))
+  
+  ggplot(ttt) +
+    geom_bar(aes(event, freq, fill=event), 
+           color='black', stat='identity') +
+    facet_wrap(as.formula(paste("~", group_var)), nrow=1) +
+    scale_fill +
+    labs()
+    theme +
+    theme(legend.position = "bottom")
+  
+}
 
+caption = paste("©",year(today()),"Gregory Kanevsky Infographics.","Source: www.dallasopendata.com")
+
+# some OSX work-around 
+if (Sys.info()["sysname"] == "Darwin")
+  Sys.setenv (TZ="America/Chicago")
 ```
 
 ## Loading Dallas OpenData datasets
@@ -186,8 +215,6 @@ caption = paste("Source: https://goo.gl/xCVUFT ©",year(today()),"Gregory Kanevs
 ### Access to Dalla OpenData Datasets
 Dallas OpenData is powered by Socrata and its [Open Data Network](https://socrata.com/blog/socrata-introduces-open-data-network/) that supports [Socrata Open Data API](https://dev.socrata.com/) (SODA API). Package [RSocrata](https://github.com/Chicago/RSocrata) supports SODA API and variety of data sources including public Dallas OpenData without neither access credentials nor API token:
 ```{r Data Load, cache=TRUE}
-library(RSocrata)
-
 data15.source = read.socrata(url = "https://www.dallasopendata.com/resource/8pn8-24ku.csv")
 data16.source = read.socrata(url = "https://www.dallasopendata.com/resource/4qfv-27du.csv")
 data17.source = read.socrata(url = "https://www.dallasopendata.com/resource/8849-mzxh.csv")
@@ -196,10 +223,6 @@ data17.source = read.socrata(url = "https://www.dallasopendata.com/resource/8849
 ### Preprocessing Data Files
 File format slightly changed after 2016 so we process 2015 and 2016 first and then 2017 into two separate data frames:
 ```{r Data Preprocessing, cache=TRUE}
-library(lubridate)
-library(stringr)
-library(tidyr)
-library(dplyr)
 
 # 2015 and 2016
 data15n16 = bind_rows(data15.source, data16.source) %>%
@@ -275,7 +298,7 @@ ggplot(data) +
   labs(title="Admissions by Animal Types",
        subtitle="Dallas Animal Shelters, FY 2015-2017",
        caption = caption, x=NULL, y=NULL) +
-  theme_minimal(base_size = 16, base_family = 'serif') +
+  theme_minimal(base_size = 16, base_family = 'Palatino') +
   theme(legend.position = "none",
         axis.text.x = element_text(face='plain',angle=310,hjust=0),
         plot.caption = element_text(size = 10, hjust=1))
@@ -312,7 +335,7 @@ The code above is crude attempt at sequential pattern processing like SQL functi
 Having identified records for the same stay we can compact them into single records:
 ```{r Sessionize, cache=TRUE}
 # combine mutlple records for the same animal stay into single record
-model.data.dogscats = model.data.dogscats %>%
+model.data.dogscats.compact = model.data.dogscats %>%
   group_by(groupid) %>%
   summarise(
     intake_ts = min(intake_ts),
@@ -335,19 +358,13 @@ model.data.dogscats = model.data.dogscats %>%
   mutate(monthly_in = floor_date(intake_ts, 'month'),
          monthly_out = floor_date(outcome_ts, 'month'))
 
-
- 
-# when testing 
-# file="../data/Dallas_Animal_Shelter_Data2015-2017.Rda"
-# saveRDS(model.data, file=file) 
-# model.data = readRDS(file=file)
 ```
 
 ## Exploratory Analysis
 
 ### Intake Types
 ```{r Intake Types, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
-data = model.data.dogscats %>% 
+data = model.data.dogscats.compact %>% 
   group_by(animal, type) %>%
   summarise(count = n()) %>%
   arrange(desc(animal), -count) %>% 
@@ -369,7 +386,7 @@ ggplot(data) +
 
 ### Outcomes
 ```{r Outcomes, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
-data = model.data.dogscats %>%
+data = model.data.dogscats.compact %>%
   group_by(animal, outcome) %>%
   summarise(count = n()) %>%
   arrange(desc(animal), -count) %>%
@@ -395,23 +412,23 @@ Sankey diagram will show how dogs addmitted to shelters transition from intake t
 ### Cats
 
 ```{r SankeyCats, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
-createIntakeToOutcomeSankey(model.data.dogscats, "Cats")
+createIntakeToOutcomeSankey(model.data.dogscats.compact, "Cats")
 ```
 
 ### Dogs 
 
 ```{r SankeyDogs, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
-createIntakeToOutcomeSankey(model.data.dogscats, "Dogs")
+createIntakeToOutcomeSankey(model.data.dogscats.compact, "Dogs")
 ```
 
 ## Correlations
 Next, we would like to correlate intake types with outcomes. For that we devise monthly trends for both and correlate resulting time series - the total of 12 combinations of 3 intake types and 4 outcommes:
 ```{r Compute correlation matrix, cache=FALSE, echo=FALSE}
-result = computeAndCreateCorrelations(model.data.dogscats, 'Cats', excludeDate = '2017-09-01')
+result = computeAndCreateCorrelations(model.data.dogscats.compact, 'Cats', excludeDate = '2017-10-01')
 cormat.cats = result[[1]]
 plots.cats = result[[2]]
 
-result = computeAndCreateCorrelations(model.data.dogscats, 'Dogs', excludeDate = '2017-09-01')
+result = computeAndCreateCorrelations(model.data.dogscats.compact, 'Dogs', excludeDate = '2017-10-01')
 cormat.dogs = result[[1]]
 plots.dogs = result[[2]]
 ```
@@ -446,13 +463,98 @@ grid.arrange(plots.dogs[[1]], plots.dogs[[2]], plots.dogs[[3]],
              top=textGrob("Dogs Monthly Trends: Intake Types vs. Outcomes", gp=gpar(fontsize=18, fontfamily='serif'), just="right"))
 ```
 
-## The Kaplan-Meier survival curves
+## Time Spent in Shelters
 
-### Survival Curves by Animal Types - Dogs vs. Cats
-```{r, cache=FALSE}
-survival.data = model.data.dogscats %>%  
+### Time Spent Dogs vs. Cats
+```{r TimeInShelterHistCatsVsDogs, cache=FALSE, echo=FALSE, fig.width=10, fig.height=6}
+ins = c("CONFISCATED","OWNER SURRENDER","STRAY")
+outs = c("ADOPTION","EUTHANIZED","RETURNED TO OWNER","TRANSFER")
+ggplot(model.data.dogscats.compact[!is.na(model.data.dogscats.compact$hours) &
+                             model.data.dogscats.compact$hours <= 720 &
+                             model.data.dogscats.compact$outcome %in% outs &
+                             model.data.dogscats.compact$type %in% ins,]) +
+  geom_histogram(aes(x=hours/24, y=..density.., fill=animal), 
+                 bins=100, position="dodge") +
+  scale_fill_solarized(name="Animal") +
+  facet_wrap(~animal, ncol=1) +
+  labs(title="Days Spent in a Shelter - Cats vs Dogs",
+       subtitle="Density Scale. Dallas Animal Shelters, FY 2015-2017",
+       caption=caption, x=NULL, y=NULL) +
+  theme_minimal(base_size = 16, base_family = 'serif') +
+  theme(legend.position = "none",
+        strip.text = element_text(size = 14, face = 'bold'),
+        plot.caption = element_text(size = 10, hjust=0))
+```
+
+### Time Distributions by Admission and Outcome
+
+#### Histograms
+
+```{r TimeInShelterHistograms, cache=FALSE, echo=FALSE, fig.width=10, fig.height=8}
+ggplot(model.data.dogscats.compact[!is.na(model.data.dogscats.compact$hours) &
+                             model.data.dogscats.compact$hours <= 960 &
+                             model.data.dogscats.compact$outcome %in% outs &
+                             model.data.dogscats.compact$type %in% ins,]) +
+  geom_histogram(aes(x=hours/24, y=..density.., fill=animal, group=animal), 
+                 bins=40, position="dodge") +
+  scale_fill_solarized(name="Animal") +
+  facet_grid(type~outcome, scales="free_y", switch = "both") +
+  labs(title="Days Spent in a Shelter by Admissions and Outcomes",
+       subtitle="Density Scale. Dallas Animal Shelters, FY 2015-2017",
+       caption=caption, x=NULL, y=NULL) +
+  theme_minimal(base_size = 16, base_family = 'serif') +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 14, face = 'bold'),
+        plot.caption = element_text(size = 10, hjust=0))
+```
+
+#### Density Curves
+Kernel density estimate is a smoothered version of the histogram above.
+```{r TimeInShelterDensityCurves, cache=FALSE, echo=FALSE, fig.width=10, fig.height=8}
+ggplot(model.data.dogscats.compact[!is.na(model.data.dogscats.compact$hours) &
+                             model.data.dogscats.compact$hours <= 960 &
+                             model.data.dogscats.compact$outcome %in% outs &
+                             model.data.dogscats.compact$type %in% ins,]) +
+  geom_density(aes(x=hours/24, color=animal, group=animal), size=1) +
+  scale_color_solarized(name="Animal", guide=guide_legend(override.aes = list(fill = solarized_pal()(2)))) + # scale_fill_solarized(name="Animal") +
+  facet_grid(type~outcome, scales="free_y", switch = "both") +
+  labs(title="Days Spent in a Shelter by Admissions and Outcomes",
+       subtitle="Density Curve Estimates. Dallas Animal Shelters, FY 2015-2017",
+       caption=caption, x=NULL, y=NULL) +
+  theme_minimal(base_size = 16, base_family = 'serif') +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 14, face = 'bold'),
+        plot.caption = element_text(size = 10, hjust=0))
+```
+
+### Sankeys Based on Average Time Spent at Shelters
+
+Let's revisit Sankey diagrams to show average time of stay depending on admission and outcome. In the Sankeys below transition arrow widths correspond to average length of stay: the wider the longer and the narrower the shorter:
+
+#### Cats
+
+```{r SankeyCatsTime, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
+createIntakeToOutcomeSankey(model.data.dogscats.compact, "Cats", metric="hours")
+```
+
+#### Dogs 
+
+```{r SankeyDogsTime, cache=TRUE, echo=FALSE, fig.width=8, fig.height=6}
+createIntakeToOutcomeSankey(model.data.dogscats.compact, "Dogs", metric="hours")
+```
+
+## Survival Analysis
+We enhance the data with new attributes first:
+
+ * **event**: survival outcome is 1 if the animal died or 0 if it survived its stay at shelter;
+ * **unhealthy_in**: if animals was unhealthy or not at admission;
+ * **contagious_in**: if animal was contagious or not at admission;
+ * **treatable_in**: if animal was in untreatable, rehabiltable, or manageable condition at admission.
+ 
+```{r MakeSurvivalData, cache=FALSE}
+survival.data = model.data.dogscats.compact %>%  
   filter(hours < 2500) %>%
-  mutate(event = ifelse(outcome %in% c('DIED','EUTHANIZED'), 1, 0),
+  mutate(event = ifelse(outcome %in% c('DIED','EUTHANIZED','MISSING'), 1, 0),
          unhealthy_in = ifelse(condition_in ==  'HEALTHY', 'NO', 'YES'),
          contagious_in = ifelse(is.na(str_match(condition_in, ' CONTAGIOUS$')[,1]), 'NO','YES'),
          treatable_in = ifelse(is.na(str_match(condition_in, '^TREATABLE ')[,1]), 'UNTREATABLE',
@@ -460,16 +562,7 @@ survival.data = model.data.dogscats %>%
                                       'REHABILITABLE', 'MANAGEABLE')))
 ```
 
-```{r, cache=FALSE, fig.width=8, fig.height=6}  
-km.animal = survfit(Surv(hours, event) ~ animal, data=survival.data)
-
-p1 = createSurvivalCurve(km.animal, "Animal", nchar("animal")+2)
-p2 = createSurvivalHistogram(survival.data, "animal", caption=caption)
-grid.arrange(p1, p2, heights=c(3.5/5, 1.5/5), ncol=1)
-```
-
-Again, for consistency and plausability of analysis will focus on survival of dogs from here on.
-```{r, cache=FALSE}
+```{r MakeSurvivalDogsData, cache=FALSE, fig.width=8, fig.height=7}
 survival.data.dogs = survival.data %>%  
   filter(
     animal == 'Dogs',
@@ -482,8 +575,160 @@ survival.data.dogs = survival.data %>%
     origin %in% c('FIELD','OVER THE COUNTER','SWEEP','NIGHT DROP')) 
 ```
 
-### Survival Curves by Intake Types
-```{r, cache=FALSE, fig.width=8, fig.height=8}
+### Survival Probabilities
+
+Chances of dying in shelter by various categories available at intake time:
+```{r MakeSurvivalProbabilities, cache=FALSE}
+animal_counts = survival.data %>% 
+  group_by(animal) %>% 
+  summarise(cnt = n(), survived = sum(1-event), dead = sum(event)) %>% 
+  mutate(rank = row_number(desc(cnt)),
+         odds = dead/survived,
+         notsurv_chance = dead/cnt) %>% 
+  mutate(name = paste("Animal:", toupper(animal)))
+
+intake_type_counts = survival.data.dogs %>%
+  group_by(type) %>%
+  summarise(cnt = n(), survived = sum(1-event), dead = sum(event)) %>% 
+  mutate(rank = row_number(desc(cnt)),
+         odds = dead/survived,
+         notsurv_chance = dead/cnt) %>% 
+  mutate(name = paste("Intake Type:", type))
+
+origin_counts = survival.data.dogs %>%
+  filter(origin %in% c("FIELD","OVER THE COUNTER","SWEEP")) %>%
+  group_by(origin) %>%
+  summarise(cnt = n(), survived = sum(1-event), dead = sum(event)) %>% 
+  mutate(rank = row_number(desc(cnt)),
+         odds = dead/survived,
+         notsurv_chance = dead/cnt) %>% 
+  mutate(name = paste("Origin:", origin))
+
+condition_counts = survival.data.dogs %>%
+  group_by(condition_in) %>%
+  summarise(cnt = n(), survived = sum(1-event), dead = sum(event)) %>% 
+  mutate(rank = row_number(desc(cnt)),
+         odds = dead/survived,
+         notsurv_chance = dead/cnt) %>% 
+  mutate(name = paste("Condition:", condition_in))
+
+data = rbind(animal_counts[-1], intake_type_counts[-1], origin_counts[-1],
+             condition_counts[-1])
+N = dim(data)[[1]]
+data$name = factor(data$name, levels = data$name[order(data$notsurv_chance)])
+data$text_size = (10 + data$notsurv_chance/max(data$notsurv_chance))
+data$text_pos = data$notsurv_chance/3 
+
+ggplot(data) +
+  geom_bar(aes(name, notsurv_chance, fill=name), stat = 'identity', alpha=0.7) +
+  geom_text(aes(name, text_pos, label=name, size=text_size), angle=0, family='Palatino', fontface='bold', hjust=0) +
+  scale_size(range=c(3,5)) +
+  scale_fill_manual(values = rev(colorRampPalette(wsj_pal(palette = "colors6")(4))(N))) +
+  labs(title=paste("Chances of Dying in Shelter by Intake Categories"),
+       subtitle="Dallas Animal Services FY 2015-2018. Only for dogs unless cats specified",
+       caption=caption, x=NULL, y="Expected Probability") +
+  coord_flip() +
+  theme_minimal(base_size = 14, base_family = 'serif') +
+  theme(legend.position = "none",
+        # axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        panel.grid.major.y = element_blank(),
+        strip.text = element_text(size = 14, face = 'bold'),
+        plot.caption = element_text(size = 10, hjust=1))
+```
+
+How many breeds are registered?
+```{r DiffBreeds, cache=FALSE, fig.width=8, fig.height=7}
+breed_counts = survival.data.dogs %>% 
+  group_by(breed) %>% 
+  summarise(cnt = n(), survived = sum(1-event), dead = sum(event)) %>% 
+  mutate(rank = row_number(desc(cnt)),
+         odds = dead/survived,
+         notsurv_chance = dead/cnt) %>% 
+  arrange(desc(rank))
+
+data = breed_counts[breed_counts$cnt >= 100,]
+N = dim(data)[[1]]
+data$breed = factor(data$breed, levels = data$breed[order(-data$rank)])
+data$text_size = (10 + data$cnt/max(data$cnt))
+data$text_pos = ifelse(data$cnt>5000, data$cnt/2, data$cnt + 100)
+
+ggplot(data) +
+  geom_bar(aes(breed, cnt, fill=breed), stat = 'identity', alpha=0.7) +
+  geom_text(aes(breed, text_pos, label=breed, size=text_size), angle=0, family='Palatino', fontface='bold', hjust=0) +
+  scale_size(range=c(2,4)) +
+  scale_fill_manual(values = rev(colorRampPalette(wsj_pal(palette = "colors6")(6))(N))) +
+  labs(title=paste("Dog Breeds Admitted to Shelters"),
+       subtitle="Dallas Animal Services FY 2015-2017. Only breeds with 100+ admissions", 
+       caption=caption, x=NULL, y="Admissions") +
+  coord_flip() +
+  # theme_tufte(base_size = 14, base_family = 'serif', ticks=FALSE) +
+  theme_minimal(base_size = 14, base_family = 'serif') +
+  theme(legend.position = "none",
+        # axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        panel.grid.major.y = element_blank(),
+        strip.text = element_text(size = 14, face = 'bold'),
+        plot.caption = element_text(size = 10, hjust=1))
+```
+
+Unfortunate for Pit bull terrier group they have the worst chances of survival baring top breed of Chow chow. Survival chances also appear to correlate with dog sizes but for the lack of this information we can't substantiate it with data.
+```{r ChancesBreeds, cache=FALSE, fig.width=8, fig.height=7}
+data = breed_counts[breed_counts$cnt >= 100,]
+N = dim(data)[[1]]
+data$breed = factor(data$breed, levels = data$breed[order(data$notsurv_chance)])
+data$text_size = (10 + data$notsurv_chance/max(data$notsurv_chance))
+data$text_pos = data$notsurv_chance/2 # ifelse(data$cnt>5000, data$cnt/2, data$cnt + 100)
+
+ggplot(data) +
+  geom_bar(aes(breed, notsurv_chance, fill=breed), stat = 'identity', alpha=0.7) +
+  geom_text(aes(breed, text_pos, label=breed, size=text_size), angle=0, family='Palatino', fontface='bold', hjust=0) +
+  scale_size(range=c(2,4)) +
+  scale_fill_manual(values = rev(colorRampPalette(wsj_pal(palette = "colors6")(4))(N))) +
+  labs(title=paste("Chances of Dying in Shelter by Dog Breed"),
+       subtitle="Dallas Animal Services FY 2015-2018. Only breeds with 100+ admissions",
+       caption=caption, x=NULL, y="Expected Probability") +
+  coord_flip() +
+  # theme_tufte(base_size = 14, base_family = 'serif', ticks=FALSE) +
+  theme_minimal(base_size = 14, base_family = 'serif') +
+  theme(legend.position = "none",
+        # axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        panel.grid.major.y = element_blank(),
+        strip.text = element_text(size = 14, face = 'bold'),
+        plot.caption = element_text(size = 10, hjust=1))
+```
+
+
+### The Kaplan-Meier survival curves
+
+#### Survival Curves by Animal Types - Dogs vs. Cats
+
+```{r KMCurveByAnimal, cache=FALSE, fig.width=8, fig.height=7}  
+km.animal = survfit(Surv(hours, event) ~ animal, data=survival.data)
+
+p1 = createSurvivalCurve(km.animal, "Animal", nchar("animal")+2, 
+                         scale_color = scale_color_solarized(name="Animal"))
+p2 = createSurvivalHistogram(survival.data, "animal", caption=caption,
+                             scale_fill = scale_fill_solarized(name="Animal"))
+grid.arrange(p1, p2, heights=c(3.5/5, 1.5/5), ncol=1)
+```
+
+#### First 2 Weeks
+Let's zoom in into first 2 weeks to see how critical those first days at shelter are:
+```{r KMCurveByAnimal2weeks, cache=FALSE, fig.width=8, fig.height=6}
+p1 + xlim(0,15) + 
+  labs(title="Cats and Dogs: First 2 Weeks", 
+       caption=caption) +
+  theme(legend.position = "bottom",
+        plot.caption = element_text(size = 8, hjust = 0)) 
+  
+```
+
+Again, for consistency and plausability of analysis will focus on survival of dogs from here on.
+
+#### Survival Curves by Intake Types
+```{r KMCurveByIntakeTypes, cache=FALSE, fig.width=8, fig.height=7}
 km.type = survfit(Surv(hours, event) ~ type, data=survival.data.dogs)
 p1 = createSurvivalCurve(km.type, "Dog Intake Type", nchar("type")+2,
                     title="Dogs by Shelter Intake Type",
@@ -496,39 +741,46 @@ p2 = createSurvivalHistogram(survival.data.dogs, "type",
 grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
 ```
 
-## Survival Curves by Dog Origin in Shelter
-```{r, cache=FALSE, fig.width=8, fig.height=8}
-km.origin = survfit(Surv(hours, event) ~ origin, data=survival.data.dogs)
+#### Survival Curves by Dog Origin in Shelter
+```{r KMCurveByOrigin, cache=FALSE, fig.width=8, fig.height=7}
+data = survival.data.dogs[survival.data.dogs$origin %in% c("FIELD","OVER THE COUNTER","SWEEP"),]
+km.origin = survfit(Surv(hours, event) ~ origin, data=data)
 p1 = createSurvivalCurve(km.origin, "Dog Origin in Shelter", nchar("origin")+2,
                     title="Dogs by Origin In Shelter", legend.position = "none")
 
-p2 = createSurvivalHistogram(survival.data.dogs, "origin", 
+p2 = createSurvivalHistogram(data, "origin", 
                              subtitle="Accepted to Dallas Shelters Totals by Origin and Outcome",
                              legend.position="right", caption = caption, legend.title = "Origin")
 
 grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
 ```
 
-### Survival of Healthy vs. Unhealthy Dogs
-```{r, cache=FALSE, fig.width=8, fig.height=8}
+#### Survival of Healthy vs. Unhealthy Dogs
+```{r KMCurveByHealth, cache=FALSE, fig.width=8, fig.height=7}
 km.healthy = survfit(Surv(hours, event) ~ unhealthy_in, data=survival.data.dogs)
 p1 = createSurvivalCurve(km.healthy, "Dog Health In", nchar("unhealthy_in")+2,
-                    title="Dogs by Healthy vs. Unhealthy Condition In", legend.position = "none")
+                    title="Dogs by Unhealthy Condition In", legend.position = "none")
 
 p2 = createSurvivalHistogram(survival.data.dogs, "unhealthy_in", 
-                             subtitle="Accepted to Dallas Shelters Totals by Healthy Condition In and Outcome",
+                             subtitle="Accepted to Dallas Shelters Totals by Unhealthy Condition In and Outcome",
                              legend.position="right", caption = caption, legend.title = "Unhealthy")
 
 grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
 ```
 
-### Survival by Condition Entering Shelter
-```{r, cache=FALSE, fig.width=8, fig.height=8}
-km.condition = survfit(Surv(hours, event) ~ condition_in, data=survival.data.dogs)
+#### Survival by Condition Entering Shelter
+We select only conditions represented by at least 1000 dogs.
+```{r KMCurveByConditionIn, cache=FALSE, fig.width=8, fig.height=7}
+data = survival.data.dogs %>% 
+  group_by(condition_in) %>% 
+  filter(n() >= 1000) %>% 
+  droplevels()
+
+km.condition = survfit(Surv(hours, event) ~ condition_in, data=data)
 p1 = createSurvivalCurve(km.condition, "Dog Condition In", nchar("condition_in")+2,
                     title="Dogs by Shelter Condition In", legend.position = "none")
 
-p2 = createSurvivalHistogram(survival.data.dogs, "condition_in", legend.position = "right",
+p2 = createSurvivalHistogram(data, "condition_in", legend.position = "right",
                              subtitle="Accepted to Dallas Shelters Totals by Condition In and Outcome",
                              caption = caption, legend.title = "Condition")
 
@@ -542,8 +794,8 @@ into several attributes:
   * Contagious (Yes/No) (makes sense only in case of unhealthy dogs)
   * Treatable (Untreatable/Manageable/Rehabilitable) (makes sense only in case of unhealthy dog)
 
-### Survival of Unhealthy Dogs by Contagious Condition In
-```{r, cache=FALSE, fig.width=8, fig.height=8}
+#### Survival of Unhealthy Dogs by Contagious Condition In
+```{r, cache=FALSE, fig.width=8, fig.height=7}
 survival.data.dogs.unhealthy = survival.data.dogs %>%
   filter(unhealthy_in == 'YES')
 
@@ -558,7 +810,7 @@ p2 = createSurvivalHistogram(survival.data.dogs.unhealthy, "contagious_in", lege
 grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
 ```
 
-### Survival of Unhealthy Dogs by Treatable Condition In
+#### Survival of Unhealthy Dogs by Treatable Condition In
 ```{r, cache=FALSE, fig.width=8, fig.height=7}
 km.contagious = survfit(Surv(hours, event) ~ treatable_in, data=survival.data.dogs.unhealthy)
 p1 = createSurvivalCurve(km.contagious, "Unhealthy Dogs Contagious Condition In", nchar("treatable_in")+2,
@@ -571,7 +823,7 @@ p2 = createSurvivalHistogram(survival.data.dogs.unhealthy, "treatable_in", legen
 grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
 ```
 
-## Survival Curves by Chip Scan
+#### Survival Curves by Chip Scan
 ```{r, cache=FALSE, fig.width=8, fig.height=7}
 km.scan = survfit(Surv(hours, event) ~ chip, data=survival.data.dogs)
 p1 = createSurvivalCurve(km.scan, "Chip Scan Result", nchar("chip")+2,
@@ -584,12 +836,79 @@ p2 = createSurvivalHistogram(survival.data.dogs, "chip", legend.position = "righ
 grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
 ```
 
+#### Survival Curves by Breed
+
+We include top 5 breeds that represent about  63% of all dogs accepted to shelters.
+```{r SurvivalCurvesByBreed, cache=FALSE, fig.width=8, fig.height=7}
+N = 5
+data = survival.data.dogs %>%
+  filter(breed %in% breed_counts[breed_counts$rank <= N,]$breed)
+# data$breed = factor(data$breed, levels = breed_counts$breed[order(-breed_counts$rank)])
+data$breed_str = as.character(data$breed)
+
+km.breed = survfit(Surv(hours, event) ~ breed_str, data=data)
+p1 = createSurvivalCurve(km.breed, "Breed", nchar("chip")+2,
+                         title=paste("Top",N,"Dog Breeds by Admission"), legend.position = "none",
+                         scale_color = scale_color_ptol(name="Breed"))
+
+p2 = createSurvivalHistogram(data, "breed_str", legend.position = "right",
+                             subtitle = "Accepted to Dallas Shelters Totals by Breed and Outcome",
+                             caption = caption, legend.title = "breed",
+                             scale_fill = scale_fill_ptol(name="Breed", guide = guide_legend(reverse = TRUE)),
+                             caption_hjust = 1)
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+# Survival Curves for Pit Bull Group
+
+Pit Bull Terrier group includes Pit Bull, American Staff, Am Pit Bull Ter, and Staffordshire breeds:
+```{r SurvivalCurvesByPitBull, cache=FALSE, fig.width=8, fig.height=7}
+data = survival.data.dogs %>%
+  filter(breed %in% c('PIT BULL','AMERICAN STAFF','AM PIT BULL TER','STAFFORDSHIRE'))
+data$breed_str = as.character(data$breed)
+
+km.breed = survfit(Surv(hours, event) ~ breed_str, data=data)
+p1 = createSurvivalCurve(km.breed, "Breed", nchar("chip")+2,
+                         title="Pit Bull Terrier Group", legend.position = "none",
+                         scale_color = scale_color_ptol())
+
+p2 = createSurvivalHistogram(data, "breed_str", legend.position = "right",
+                             subtitle = "Accepted to Dallas Shelters Totals by Breed and Outcome",
+                             caption = caption, legend.title = "Pit Bulls",
+                             scale_fill = scale_fill_ptol(name="Breed"))
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+
+
+# Survival Curves for Pit Bulls vs. All Other Dogs
+```{r SurvivalCurvesByNext4Breeds, cache=FALSE, fig.width=8, fig.height=7}
+data = survival.data.dogs %>%
+  filter(breed %in% breed_counts[breed_counts$rank <=8 & breed_counts$rank > 4,]$breed)
+
+km.breed = survfit(Surv(hours, event) ~ breed, data=data)
+p1 = createSurvivalCurve(km.breed, "Breed", nchar("chip")+2,
+                         title="Dogs by Breed", legend.position = "none",
+                         scale_color = scale_color_ptol(name="Breed"))
+
+p2 = createSurvivalHistogram(data, "breed", legend.position = "right",
+                             subtitle = "Accepted to Dallas Shelters Totals by Breed and Outcome",
+                             caption = caption, legend.title = "breed",
+                             scale_fill = scale_fill_ptol(name="Breed"))
+
+grid.arrange(p1, p2, heights=c(3.0/5, 2.0/5), ncol=1)
+```
+
+### Cox PH Models
+
 ```{r, warning=FALSE}
 coxph.surv.mod = coxph(Surv(hours, event) ~ type + chip + origin + unhealthy_in, 
                        data = survival.data.dogs,
                        control = coxph.control(iter.max=100))
 summary(coxph.surv.mod)
 ```
+
+
 
 ```{r, warning=FALSE}
 coxph.surv.unhealthy.mod = coxph(Surv(hours, event) ~ type + chip + origin + contagious_in + treatable_in, 
